@@ -26,7 +26,7 @@ def get_db_connection():
     # If DATABASE_URL exists, use it
     if db_url:
         try:
-            conn = psycopg2.connect(db_url)
+            conn = psycopg2.connect(db_url, sslmode="require")
             print("[DB] Connected using DATABASE_URL")
             return conn
         except Exception as e:
@@ -55,21 +55,48 @@ def insert_transactions(conn: psycopg2.extensions.connection, transactions: list
     if not transactions:
         return
 
-    # Column names in the transactions table
-    columns = transactions[0].keys()
-    
-    # Prepare data for insertion
-    values = [tuple(t.values()) for t in transactions]
-    
-    # Use psycopg2.extras.execute_values for efficient bulk insertion
+    columns = (
+        "user_id",
+        "statement_id",
+        "txn_date",
+        "posting_date",
+        "description_raw",
+        "description_clean",
+        "amount",
+        "direction",
+        "vendor",
+        "category",
+        "subcategory",
+        "confidence",
+        "classification_source",
+    )
+
+    values = [
+        (
+            t["user_id"],
+            t["statement_id"],
+            t["txn_date"],
+            t["posting_date"],
+            t["description_raw"],
+            t["description_clean"],
+            t["amount"],
+            t["direction"],
+            t["vendor"],
+            t["category"],
+            t["subcategory"],
+            t["confidence"],
+            t["classification_source"],
+        )
+        for t in transactions
+    ]
+
     query = f"""
     INSERT INTO transactions ({', '.join(columns)})
     VALUES %s;
     """
-    
+
     with conn.cursor() as cur:
         try:
-            # Executes the INSERT command
             extras.execute_values(cur, query, values)
             conn.commit()
         except psycopg2.Error as e:
@@ -189,30 +216,75 @@ def detect_doc_type(original_filename: str) -> str:
 # Handles reading content from PDF and normalizing transaction data.
 # ====================================================================
 
-def parse_statement(filepath: str) -> tuple[str, list[dict]]:
-    """
-    STUB: Placeholder for the actual PDF parsing logic (Part of Step 4).
-    In a full implementation, this would use pdfplumber or similar tools
-    to extract text and tables from the PDF.
-    
-    Returns: bank_name (str), list of raw transaction dictionaries (list[dict]).
-    """
-    
-    # --- SIMULATE SUCCESSFUL PARSING ---
-    # Mock data structure must match the input format expected by normalize_txn
-    mock_transactions = [
-        {"date": "21/01/2025", "description": "UBER TRIP NYC", "amount": "-35.50"},
-        {"date": "22-01-2025", "description": "STARBUCKS #456", "amount": "(12.00)"},
-        {"date": "23 Jan 2025", "description": "ONLINE TRANSFER JANE", "amount": "450.00"},
-        {"date": "statement", "description": "Junk Header Row", "amount": "0"}, 
-        # The normalize.py logic will skip the junk row
-    ]
-    
-    bank_name = "MockBank of America"
-    print(f"[PARSER] Parsed {len(mock_transactions)} raw entries from PDF.")
-    
-    return bank_name, mock_transactions
 
+# Optional: Toggle between real parser and mock data for testing
+USE_REAL_PARSER = os.getenv("USE_REAL_PARSER", "false").lower() == "true"
+
+import pdfplumber
+from parsers.bob import parse_bob
+from parsers.pnb import parse_pnb
+from parsers.sbi import parse_sbi
+from parsers.federal import parse_federal_bank
+
+
+def parse_statement(filepath: str):
+    """
+    Detects the bank from the PDF's first page and routes to the correct parser.
+    Expected return:
+        bank_name: str
+        txns: list[{ date, description, amount }]
+    """
+    try:
+        with pdfplumber.open(filepath) as pdf:
+            first_text = pdf.pages[0].extract_text() or ""
+            lower = first_text.lower()
+
+            # -------------- BANK DETECTION LOGIC --------------
+            if "bank of baroda" in lower or "statement of account" in lower:
+                bank = "BOB"
+                txns = parse_bob(pdf, filepath)
+
+            elif "punjab national bank" in lower or "pnb" in lower:
+                bank = "PNB"
+                txns = parse_pnb(pdf, filepath)
+
+            elif "state bank of india" in lower or "sbi" in lower:
+                bank = "SBI"
+                txns = parse_sbi(pdf, filepath)
+
+            elif "federal bank" in lower:
+                bank = "Federal Bank"
+                txns = parse_federal_bank(pdf, filepath)
+
+            else:
+                print(f"[WARN] Could not detect bank for: {filepath}")
+                return None, []
+            
+            # --------- ENSURE OUTPUT FORMAT IS CONSISTENT ---------
+            normalized = []
+            for row in txns:
+                # Your individual parsers might return either:
+                #  { date, description, amount } OR
+                #  { date, description, debit, credit }
+                if "amount" in row:
+                    amt = row["amount"]
+                else:
+                    debit = float(row.get("debit", 0) or 0)
+                    credit = float(row.get("credit", 0) or 0)
+                    amt = credit - debit  # positive credit, negative debit
+
+                normalized.append({
+                    "date": row.get("date", ""),
+                    "description": row.get("description", ""),
+                    "amount": amt,
+                })
+
+            print(f"[PARSER] Parsed {len(normalized)} rows from {bank}.")
+            return bank, normalized
+
+    except Exception as e:
+        print(f"[ERROR] PDF parsing failed for {filepath}: {e}")
+        return None, []
 
 def clean_amount(value):
     """
@@ -253,7 +325,7 @@ def parse_date(raw_date):
 
 def normalize_txn(tx: dict, statement_id: uuid.UUID, user_id: str):
     """
-    Skips junk rows and normalizes raw transaction data to the canonical schema (From normalize.py).
+    Skips junk rows and normalizes raw transaction data to the canonical schema.
     """
 
     bad_values = (
@@ -271,25 +343,35 @@ def normalize_txn(tx: dict, statement_id: uuid.UUID, user_id: str):
     # Safe date parsing
     try:
         txn_date = parse_date(tx["date"])
-    except:
+    except Exception:
         return None
 
     description = tx.get("description", "").strip()
     amount = clean_amount(tx.get("amount"))
 
-    # Return structure MUST match the 'transactions' table columns (minus generated fields)
+    # Infer direction from sign
+    if amount < 0:
+        direction = "debit"
+    elif amount > 0:
+        direction = "credit"
+    else:
+        direction = None
+
     return {
         "user_id": user_id,
         "statement_id": statement_id,
         "txn_date": txn_date,
+        "posting_date": txn_date,           # same as txn_date for now
         "description_raw": description,
+        "description_clean": description,   # later you can clean this further
         "amount": amount,
-        # Default classification fields (will be populated on Day 3/4/5)
-        "vendor": "UNCLASSIFIED", 
-        "category": "PENDING", 
-        "confidence": 0.0
+        "direction": direction,
+        "vendor": "UNCLASSIFIED",
+        "category": "PENDING",
+        "subcategory": None,
+        "confidence": 0.0,
+        "classification_source": None,
     }
-
 
 # ====================================================================
 # IV. MAIN PIPELINE EXECUTION (main_pipeline.py logic - Step 4)
