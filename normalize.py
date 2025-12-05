@@ -1,84 +1,80 @@
-# normalize.py
-import re
 from datetime import datetime
 
-def clean_amount(text):
+# ---------------------------------------------------
+# Amount Cleaner (required by parsers/utils.py)
+# ---------------------------------------------------
+def clean_amount(value):
     """
-    Convert amount-like strings into float.
-    Reused from your original script with small tweaks.
+    Convert amount strings like '1,234.56', '(123.45)', '- 123' into float.
     """
-    if text is None:
+    if value is None:
         return 0.0
-    cleaned = str(text).replace(",", "").replace("\n", "").strip()
-    cleaned = re.sub(r"\s+(Cr|DR|DR\.|CR|Dr|Cr)\.?$", "", cleaned, flags=re.IGNORECASE)
-    if cleaned in ("", "-", "NA"):
+
+    val = str(value).strip()
+
+    # Handle negative amounts in parentheses
+    if val.startswith("(") and val.endswith(")"):
+        val = "-" + val[1:-1]
+
+    # Remove commas & spaces
+    val = val.replace(",", "").replace(" ", "")
+
+    try:
+        return float(val)
+    except:
         return 0.0
-    match = re.search(r"[\d\.]+", cleaned)
-    return float(match.group(0)) if match else 0.0
 
 
-def parse_date(raw_date: str):
-    """
-    Try multiple date formats and return a datetime.date.
-    Raises ValueError if nothing matches.
-    """
-    raw = raw_date.replace("\n", "").strip()
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d-%m-%y", "%d/%m/%y"):
+# ---------------------------------------------------
+# Date Parser
+# ---------------------------------------------------
+def parse_date(raw_date):
+    raw_date = raw_date.strip()
+
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"):
         try:
-            return datetime.strptime(raw, fmt).date()
+            return datetime.strptime(raw_date, fmt).date()
         except ValueError:
-            continue
+            pass
+
     raise ValueError(f"Unrecognized date format: {raw_date!r}")
 
 
-def normalize_txn(tx: dict, statement_id, user_id):
+# ---------------------------------------------------
+# Normalizer
+# ---------------------------------------------------
+def normalize_txn(tx, statement_id, user_id):
     """
-    Convert parser output into the canonical transaction schema
-    expected by the `transactions` table.
-
-    Expected input dict from parsers:
-      {
-        "bank": "BOB" | "PNB" | "Federal Bank",
-        "date": "01/12/2024",
-        "description": "...",
-        "debit": float,
-        "credit": float,
-        "balance": float,
-        "category": None
-      }
+    Skip junk rows and normalize real transactions.
     """
-    txn_date = parse_date(tx["date"])
-    debit = float(tx.get("debit", 0.0) or 0.0)
-    credit = float(tx.get("credit", 0.0) or 0.0)
 
-    if debit > 0 and credit > 0:
-        # should not normally happen; treat as debit for now
-        direction = "debit"
-        amount = -debit
-    elif debit > 0:
-        direction = "debit"
-        amount = -debit
-    elif credit > 0:
-        direction = "credit"
-        amount = credit
-    else:
-        direction = None
-        amount = 0.0
+    bad_values = (
+        "accountholder", "account holder",
+        "accountnumber", "account number",
+        "statement", "page",
+        "opening balance", "closing balance",
+        "debit", "credit"
+    )
 
-    desc = (tx.get("description") or "").strip()
+    raw_date = str(tx.get("date", "")).strip().lower()
+
+    # Skip junk rows BEFORE date parsing
+    if not raw_date or any(raw_date.startswith(b) for b in bad_values):
+        return None
+
+    # Safe date parsing
+    try:
+        txn_date = parse_date(tx["date"])
+    except:
+        return None
+
+    description = tx.get("description", "").strip()
+    amount = clean_amount(tx.get("amount"))
 
     return {
-        "statement_id": statement_id,
         "user_id": user_id,
-        "txn_date": txn_date,
-        "posting_date": txn_date,   # you can change this later
-        "description_raw": desc,
-        "description_clean": desc,  # later you can run cleaning/normalization
+        "statement_id": statement_id,
+        "date": txn_date,
+        "description": description,
         "amount": amount,
-        "direction": direction,
-        "vendor": None,
-        "category": None,
-        "subcategory": None,
-        "confidence": None,
-        "classification_source": None,
     }
