@@ -1,190 +1,316 @@
-# nlp/llm_classifier.py
+# llm/llm_classifier.py
 """
-LLM Fallback classifier using Google GenAI (google-genai).
-This module is defensive: it will NOT crash on import if the API key is missing
-or if the GenAI call fails. Instead it falls back to a lightweight rule-based
-classifier that returns a safe "UNCLEAR"/low-confidence result.
+LLM Fallback classifier using Google Gemini (google-genai).
 
-Exports:
-    llm_clf  -- an initialized instance of LLMFallbackClassifier
+Features:
+- Uses Gemini for semantic classification when available
+- Falls back to lightweight rule-based classifier on errors/quota issues
+- In-memory caching so the same description is not classified twice
+- Batch classification for efficiency (classify_batch)
+- Fully compatible with:
+    category, subcategory, confidence, meta = llm_clf.classify(desc)
 """
 
 import os
 import json
-from typing import Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict
 
-# pydantic used for optional validation (keeps interface stable)
-from pydantic import BaseModel, Field, ValidationError
+from dotenv import load_dotenv
 
-# Attempt to import the new genai SDK. If unavailable, we'll still operate in fallback mode.
+load_dotenv()
+
+# Try to import the genai SDK (google-genai)
 try:
     from google import genai
-    from google.genai import types
     GENAI_AVAILABLE = True
 except Exception:
     genai = None
-    types = None
     GENAI_AVAILABLE = False
 
-# -------------------------
-# Structured output schema
-# -------------------------
-class ClassificationOutput(BaseModel):
-    category: str = Field(..., description="Primary category, e.g., 'Food'")
-    subcategory: Optional[str] = Field(None, description="Secondary category, e.g., 'Groceries'")
-    explanation: Optional[str] = Field(None, description="Short explanation/justification")
-
 
 # -------------------------
-# LLM Fallback Classifier
+# Global taxonomy prompt
 # -------------------------
+SYSTEM_PROMPT = """
+You are an AI system that classifies bank transactions into a FIXED taxonomy.
+
+RULES:
+- ALWAYS choose exactly one category and one subcategory.
+- Only choose from the taxonomy shown.
+- If unclear, use category="Other" and subcategory="Misc".
+- Respond ONLY with JSON. No prose. No explanations outside JSON.
+
+TAXONOMY (category → subcategory list):
+
+Dining: ["FoodDelivery", "Restaurant", "Cafe"]
+Groceries: ["OnlineGroceries", "Supermarket"]
+Shopping: ["Online", "Electronics", "Fashion", "Beauty"]
+Entertainment: ["Streaming", "Music", "Gaming"]
+Transport: ["Cab", "BikeTaxi", "PublicTransport", "Fuel"]
+Utilities: ["Electricity", "Gas", "Internet", "MobileRecharge"]
+Income: ["Salary", "Interest", "Refund"]
+Debt: ["LoanEMI", "CreditCardPayment"]
+BankCharges: ["BalanceCharge", "SMS", "LateFee", "Other"]
+Cash: ["ATMWithdrawal", "ATMDeposit"]
+Insurance: ["GovtScheme", "Life", "Health"]
+Leisure: ["Gaming", "Subscriptions", "Other"]
+Transfers: ["SelfAccount", "ToPerson", "ToBusiness"]
+Other: ["Misc"]
+
+OUTPUT SCHEMA (for each transaction):
+{
+  "category": "<category>",
+  "subcategory": "<subcategory>",
+  "confidence": <float between 0 and 1>,
+  "rationale": "<short explanation>"
+}
+""".strip()
+
+
+def _normalize_desc(desc: str) -> str:
+    """Simple normalization used for caching keys."""
+    return (desc or "").strip().upper()
+
+
 class LLMFallbackClassifier:
-    def __init__(self, model_name: str = "gemini-2.5-flash"):
-        """
-        Initialize the classifier.
+    """
+    Gemini-based classifier with:
+      - single classify()
+      - classify_batch()
+      - in-memory caching
+      - robust fallback on quota / API errors
+    """
 
-        - model_name: model identifier to request from GenAI SDK.
-        - If GEMINI_API_KEY is missing, the classifier will operate in fallback mode.
-        """
-        self.model_name = model_name
+    def __init__(self, model_name: Optional[str] = None):
+        # Model + API key
+        self.model_name = model_name or os.getenv(
+            "GEMINI_MODEL",
+            "gemini-2.0-flash-lite-preview"  # safer default for free tier
+        )
         self.api_key = os.getenv("GEMINI_API_KEY")
+        self.temperature = 0.2
 
-        # Defensive: only create a genai.Client if the sdk is present and key exists
+        # In-memory cache: norm_desc -> (cat, subcat, conf, meta)
+        self.cache: Dict[str, Tuple[str, Optional[str], float, Dict]] = {}
+
+        # Initialize client if possible
         self.client = None
         if GENAI_AVAILABLE and self.api_key:
             try:
-                # genai.Client is available in google-genai
                 self.client = genai.Client(api_key=self.api_key)
-                print("[LLM] GenAI client initialized.")
+                print("[LLM] Gemini client initialized.")
             except Exception as e:
-                print(f"[LLM WARN] Failed to initialize GenAI client: {e}")
+                print(f"[LLM WARN] Failed to initialize Gemini client: {e}")
                 self.client = None
         else:
             if not GENAI_AVAILABLE:
-                print("[LLM WARN] google-genai SDK not available; LLM fallback will use rule-based mock.")
-            else:
-                print("[LLM WARN] GEMINI_API_KEY missing; LLM fallback will use rule-based mock.")
+                print("[LLM WARN] google-genai SDK not available; LLM will use rule-based fallback.")
+            elif not self.api_key:
+                print("[LLM WARN] GEMINI_API_KEY missing; LLM will use rule-based fallback.")
 
-        # A simple prompt template (kept small; we validate output below)
-        self.prompt_template = (
-            "You are a financial transaction classification expert.\n"
-            "Classify the transaction described below into a category and optional subcategory.\n"
-            "Return a compact JSON object with keys: category, subcategory or null, explanation.\n\n"
-            "Description: \"{description}\"\n\n"
-            "Example categories: Food.Groceries, Food.Dining, Travel.Fuel, Transport.Ride-hailing, "
-            "Shopping.Online, Utilities.Electricity, Salary, Transfer\n"
-        )
-
-    def _call_genai(self, description: str) -> Tuple[Optional[Dict], Optional[str]]:
+    # -------------------------
+    # Rule-based fallback
+    # -------------------------
+    def _rule_based_fallback(
+        self, desc: str
+    ) -> Tuple[str, Optional[str], float, Dict]:
         """
-        Try to call the GenAI SDK and return (parsed_json_dict, raw_text).
-        On any failure return (None, raw_text_or_error).
-        This function is defensive and tolerates multiple SDK calling patterns.
+        Deterministic lightweight fallback when LLM is unavailable or fails.
         """
-
-        if not self.client:
-            return None, "no-client"
-
-        prompt = self.prompt_template.format(description=description)
-
-        # Try the most-likely SDK call pattern(s). Wrap in try/except and fall back on error.
-        try:
-            # Preferred attempt: models.generate_content (some versions expose this)
-            if hasattr(self.client, "models") and hasattr(self.client.models, "generate_content"):
-                resp = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    ),
-                )
-                raw = getattr(resp, "text", None) or str(resp)
-                return json.loads(raw), raw
-
-            # Alternate attempt: responses.generate (other versions)
-            if hasattr(self.client, "responses") and hasattr(self.client.responses, "generate"):
-                # The responses.generate may return an object; try to locate text
-                resp = self.client.responses.generate(
-                    model=self.model_name,
-                    input=prompt,
-                )
-                # Attempt to extract text safely
-                raw = None
-                try:
-                    # Many responses have .output[0].content[0].text or .output_text
-                    if hasattr(resp, "output_text"):
-                        raw = resp.output_text
-                    else:
-                        # fallback parsing
-                        raw = json.dumps(resp.__dict__)
-                except Exception:
-                    raw = str(resp)
-                # Try parse
-                try:
-                    return json.loads(raw), raw
-                except Exception:
-                    # maybe resp.output was structured
-                    return None, raw
-
-            # If none of above available, return None
-            return None, "unsupported-client-api"
-
-        except Exception as e:
-            return None, f"genai-call-failed: {e}"
-
-    def _rule_based_fallback(self, description: str) -> Tuple[str, Optional[str], float, Dict]:
-        """
-        Deterministic lightweight fallback classifier when LLM is unavailable.
-        Returns low-confidence predictions so the pipeline can route to human/LLM if desired.
-        """
-        d = description.lower()
+        d = desc.lower()
         meta = {"method": "rule-fallback"}
 
-        # Simple heuristics
-        if any(k in d for k in ["uber", "ola", "ride", "cab"]):
-            return "Transport", "Ride-hailing", 0.60, meta
-        if any(k in d for k in ["starbucks", "cafe", "coffee", "dining", "restaurant"]):
-            return "Food", "Dining", 0.60, meta
-        if any(k in d for k in ["grocery", "supermarket", "bigbasket", "dmart", "grocer"]):
-            return "Food", "Groceries", 0.60, meta
-        if any(k in d for k in ["fuel", "petrol", "gasoline", "bharat petrol", "indianoil"]):
-            return "Travel", "Fuel", 0.60, meta
-        if any(k in d for k in ["salary", "payroll", "credit salary"]):
+        if any(k in d for k in ["uber", "ola", "ride", "cab", "rapido"]):
+            return "Transport", "Cab", 0.60, meta
+        if any(k in d for k in ["zomato", "swiggy", "restaurant", "resto", "hotel"]):
+            return "Dining", "FoodDelivery", 0.65, meta
+        if any(k in d for k in ["flipkart", "amazon", "myntra", "ajio"]):
+            return "Shopping", "Online", 0.65, meta
+        if any(k in d for k in ["bigbasket", "dmart", "grocer", "supermarket"]):
+            return "Groceries", "Supermarket", 0.65, meta
+        if any(k in d for k in ["netflix", "spotify", "youtube", "prime video"]):
+            return "Entertainment", "Streaming", 0.70, meta
+        if any(k in d for k in ["salary", "payroll", "credited by employer"]):
             return "Income", "Salary", 0.95, meta
-        if any(k in d for k in ["transfer", "neft", "imps", "rtgs"]):
-            return "Transfer", None, 0.55, meta
+        if any(k in d for k in ["imps", "neft", "rtgs", "fund transfer", "to upi id"]):
+            return "Transfers", "ToPerson", 0.55, meta
+        if any(k in d for k in ["atm wdl", "atm wdr", "atm withdrawal"]):
+            return "Cash", "ATMWithdrawal", 0.70, meta
 
-        # Default unclear
-        return "PENDING", None, 0.40, meta
+        # default unclear
+        return "Other", "Misc", 0.40, meta
 
-    def classify(self, description: str) -> Tuple[str, Optional[str], float, Dict]:
+    # -------------------------
+    # Internal: call Gemini for a BATCH
+    # -------------------------
+    def _call_gemini_batch(
+        self, descriptions: List[str]
+    ) -> Optional[List[Dict]]:
         """
-        Public method to classify a single transaction description.
-        Returns: (category, subcategory or None, confidence (0-1 float), meta dict)
+        Calls Gemini once for a batch of descriptions.
+        Returns list of dicts with keys:
+            index, category, subcategory, confidence, rationale
+        or None on failure.
         """
-        clean_desc = (description or "").strip()
-        if not clean_desc:
-            return "PENDING", None, 0.0, {"reason": "empty_description"}
+        if not self.client:
+            return None
 
-        # Try GenAI if client exists
-        parsed, raw = self._call_genai(clean_desc)
-        if parsed:
-            try:
-                # Validate using pydantic to ensure predictable fields
-                validated = ClassificationOutput.model_validate(parsed)
-                category = validated.category
-                subcategory = validated.subcategory
-                explanation = validated.explanation or ""
-                confidence = 0.90  # optimistic but reasonable for LLM output
-                meta = {"model": self.model_name, "raw": raw}
-                return category, subcategory, confidence, meta
-            except ValidationError as e:
-                # If schema doesn't match, fall through to fallback route
-                return "UNCLEAR", None, 0.50, {"error": "validation_failed", "details": str(e), "raw": raw}
+        items = [
+            {"index": i, "description": d}
+            for i, d in enumerate(descriptions)
+        ]
 
-        # If GenAI call not available or failed, use rule-based fallback
-        return self._rule_based_fallback(clean_desc)
+        full_prompt = (
+            SYSTEM_PROMPT
+            + "\n\nYou will receive a JSON array named 'items', where each element has:\n"
+            + '  { "index": <int>, "description": "<text>" }.\n\n'
+            + "For EACH item, produce an object with:\n"
+            + '  { "index": <same int>, "category": "<category>", "subcategory": "<subcategory>", '
+            + '"confidence": <0-1>, "rationale": "<short explanation>" }.\n\n'
+            + "Return ONLY a JSON array (no extra keys) in the same order of indices.\n\n"
+            + f"items = {json.dumps(items, ensure_ascii=False)}"
+        )
+
+        try:
+            resp = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[full_prompt],  # Gemini wants list of strings / parts
+                config={
+                    "temperature": self.temperature,
+                    "response_mime_type": "application/json",
+                },
+            )
+        except Exception as e:
+            # Quota / API failure → mark client off for remainder of process
+            err_str = str(e)
+            if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+                print(f"[LLM WARN] Gemini quota exhausted: {err_str}")
+                self.client = None
+            else:
+                print(f"[LLM WARN] Gemini call failed: {err_str}")
+            return None
+
+        raw_text = getattr(resp, "text", None) or str(resp)
+
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError:
+            print("[LLM WARN] Could not parse JSON from Gemini output.")
+            return None
+
+        # Expecting a JSON array
+        if not isinstance(data, list):
+            print("[LLM WARN] Gemini output is not a list.")
+            return None
+
+        return data
+
+    # -------------------------
+    # Public: batch classify
+    # -------------------------
+    def classify_batch(
+        self, descriptions: List[str]
+    ) -> List[Tuple[str, Optional[str], float, Dict]]:
+        """
+        Batch classify a list of descriptions.
+        Returns list of (category, subcategory, confidence, meta) with same order.
+        """
+        n = len(descriptions)
+        if n == 0:
+            return []
+
+        # 1) Initialize result list with None
+        results: List[Optional[Tuple[str, Optional[str], float, Dict]]] = [None] * n
+
+        # 2) Check cache & collect which ones need LLM
+        to_llm_indices: List[int] = []
+        to_llm_descs: List[str] = []
+
+        for i, desc in enumerate(descriptions):
+            desc_str = (desc or "").strip()
+            if not desc_str:
+                results[i] = ("Other", "Misc", 0.0, {"reason": "empty"})
+                continue
+
+            key = _normalize_desc(desc_str)
+            if key in self.cache:
+                results[i] = self.cache[key]
+            else:
+                to_llm_indices.append(i)
+                to_llm_descs.append(desc_str)
+
+        # 3) If no LLM needed, just return cached + trivial results
+        if not to_llm_descs or self.client is None:
+            # For any still None (no client), use rule-based
+            for idx in to_llm_indices:
+                d = descriptions[idx]
+                rb_cat, rb_sub, rb_conf, rb_meta = self._rule_based_fallback(d)
+                results[idx] = (rb_cat, rb_sub, rb_conf, rb_meta)
+            return [r for r in results]  # type: ignore
+
+        # 4) Call Gemini ONCE for remaining items
+        gemini_output = self._call_gemini_batch(to_llm_descs)
+
+        if gemini_output is None:
+            # LLM failed → fallback rule-based for all those
+            for local_pos, global_idx in enumerate(to_llm_indices):
+                d = to_llm_descs[local_pos]
+                rb_cat, rb_sub, rb_conf, rb_meta = self._rule_based_fallback(d)
+                key = _normalize_desc(d)
+                self.cache[key] = (rb_cat, rb_sub, rb_conf, rb_meta)
+                results[global_idx] = (rb_cat, rb_sub, rb_conf, rb_meta)
+            return [r for r in results]  # type: ignore
+
+        # 5) Map LLM results back using "index" field
+        #    Note: index is local to to_llm_descs (0..len(to_llm_descs)-1)
+        by_index: Dict[int, Dict] = {}
+        for obj in gemini_output:
+            if isinstance(obj, dict) and "index" in obj:
+                try:
+                    by_index[int(obj["index"])] = obj
+                except Exception:
+                    continue
+
+        for local_idx, global_idx in enumerate(to_llm_indices):
+            d = to_llm_descs[local_idx]
+            key = _normalize_desc(d)
+
+            if local_idx in by_index:
+                o = by_index[local_idx]
+                cat = o.get("category") or "Other"
+                sub = o.get("subcategory") or "Misc"
+                try:
+                    conf = float(o.get("confidence", 0.7))
+                except Exception:
+                    conf = 0.7
+                meta = {
+                    "rationale": o.get("rationale", ""),
+                    "model": self.model_name,
+                    "source": "gemini",
+                }
+            else:
+                # Missing index in LLM output → fallback
+                cat, sub, conf, meta = self._rule_based_fallback(d)
+                meta["reason"] = "missing_index_from_llm"
+
+            self.cache[key] = (cat, sub, conf, meta)
+            results[global_idx] = (cat, sub, conf, meta)
+
+        return [r for r in results]  # type: ignore
+
+    # -------------------------
+    # Public: single classify
+    # -------------------------
+    def classify(
+        self, description: str
+    ) -> Tuple[str, Optional[str], float, Dict]:
+        """
+        Single-text entry point.
+        Uses classify_batch internally so logic is shared.
+        """
+        res_list = self.classify_batch([description])
+        return res_list[0]
 
 
-# Instantiate a global classifier used by the pipeline
+# Global instance used in UnifiedPipeline
 llm_clf = LLMFallbackClassifier()
