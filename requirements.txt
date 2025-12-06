@@ -27,3 +27,6 @@ matplotlib==3.8.3
 
 # --- RAG (optional if you enable pgvector) ---
 pgvector==0.2.5          # Python adapter for pgvector extension
+
+# --- For llms call ------
+google-genai pydantic

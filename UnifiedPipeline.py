@@ -60,6 +60,7 @@ from nlp.miniLM_classifier import MiniLMClassifier
 bert_clf = MiniLMClassifier()
 print("[Pipeline] MiniLM classifier initialized.")
 
+from llm.llm_classifier import llm_clf
 
 
 # ============================================================
@@ -162,7 +163,7 @@ def fetch_transactions_for_llm(conn, statement_id):
     confidence is below the LLM fallback threshold (Day 5 requirement).
     """
     # Threshold based on project requirements (e.g., MiniLM confidence < 0.85)
-    LLM_FALLBACK_THRESHOLD = 0.85
+    LLM_FALLBACK_THRESHOLD = 0.50
     
     query = """
     SELECT txn_id, description_clean, description_raw, category, confidence
@@ -181,6 +182,8 @@ def fetch_transactions_for_llm(conn, statement_id):
 # Apply LLM classification to individual transaction
 # ---------------------------------------------------------------------
 
+# Updated apply_llm_to_txn function
+
 def apply_llm_to_txn(conn, txn):
     """
     Sends the transaction to the LLM Fallback, updates the DB, and logs the result.
@@ -188,7 +191,6 @@ def apply_llm_to_txn(conn, txn):
     desc = txn["description_clean"] or txn["description_raw"] or ""
     
     # 1. Classify using LLM (uses the imported llm_clf object)
-    # The llm_clf.classify function now returns category, subcategory, confidence, meta
     category, subcategory, confidence, meta = llm_clf.classify(desc)
 
     # 2. Update DB
@@ -202,10 +204,11 @@ def apply_llm_to_txn(conn, txn):
 
     # 3. Log result
     prediction = f"{category}.{subcategory}" if subcategory else category
-    # Assuming insert_classification_log is defined in PipeLine.py or imported
     insert_classification_log(conn, txn["txn_id"], "llm", prediction, confidence, meta)
 
     conn.commit()
+    # BUG FIX: Must return the classification category for tracking
+    return category
 
 # ============================================================
 #  Main file-level ingestion pipeline
@@ -223,26 +226,49 @@ def process_file(conn, filepath, user_id):
     if exists:
         print(f"[Pipeline] Skipping {original_filename}: already processed (statement_id={existing_statement_id}).")
 
-        # Still run MiniLM classification on remaining unclassified txns
-        pending = fetch_transactions_for_minilm(conn, existing_statement_id)
+        # 1) MiniLM on remaining / low-confidence
+        pending_bert = fetch_transactions_for_minilm(conn, existing_statement_id)
+        print(f"[Pipeline] MiniLM needs to process {len(pending_bert)} transactions...")
 
-        print(f"[Pipeline] MiniLM needs to process {len(pending)} transactions...")
-
-        mini_attempted = len(pending)
+        mini_attempted = len(pending_bert)
         mini_classified = 0
         mini_pending = 0
 
-        for txn in pending:
+        for txn in pending_bert:
             label = apply_minilm_to_txn(conn, txn)
             if label == "PENDING":
                 mini_pending += 1
             else:
                 mini_classified += 1
 
+        # 2) LLM on remaining after MiniLM
+        llm_pending = fetch_transactions_for_llm(conn, existing_statement_id)
+        print(f"[Pipeline] LLM needs to process {len(llm_pending)} transactions...")
+
+        llm_attempted = len(llm_pending)
+        llm_classified = 0
+
+        for txn in llm_pending:
+            cat = apply_llm_to_txn(conn, txn)
+            if cat and cat != "PENDING":
+                llm_classified += 1
+
+        print(
+            f"[Pipeline][MiniLM] attempted={mini_attempted}, "
+            f"classified={mini_classified}, remaining_for_llm={mini_pending}"
+        )
+        print(
+            f"[Pipeline][LLM] attempted={llm_attempted}, "
+            f"classified={llm_classified}"
+        )
+
+        # No new inserts
         return 0, {
             "mini_attempted": mini_attempted,
             "mini_classified": mini_classified,
             "mini_pending": mini_pending,
+            "llm_attempted": llm_attempted,
+            "llm_classified": llm_classified,
         }
 
     # ----------------------------
@@ -256,14 +282,16 @@ def process_file(conn, filepath, user_id):
         return 0, {
             "mini_attempted": 0,
             "mini_classified": 0,
-            "mini_pending": 0
+            "mini_pending": 0,
+            "llm_attempted": 0,
+            "llm_classified": 0,
         }
 
     # ----------------------------
     # Step 2: Insert doc + statement
     # ----------------------------
     doc_id, statement_id = create_document_and_statement(
-        conn, user_id, bank_name, filepath, os.path.basename(filepath)
+        conn, user_id, bank_name, filepath, original_filename
     )
 
     # ----------------------------
@@ -283,9 +311,8 @@ def process_file(conn, filepath, user_id):
     print(f"[Pipeline] Inserted {len(txn_ids)} transactions.")
 
     # ----------------------------
-    # Step 5: Regex classifier
+    # Step 5: Regex classifier (ALL new txns)
     # ----------------------------
-
     regex_attempted = len(txn_ids)
     regex_classified = 0
     regex_failed = 0
@@ -296,13 +323,11 @@ def process_file(conn, filepath, user_id):
 
         category, subcat, vendor, conf, meta = classify_with_regex(desc)
 
-        # If regex matched with confidence > 0
         if category != "PENDING":
             regex_classified += 1
         else:
             regex_failed += 1
 
-        # Update row
         q = """
         UPDATE transactions
         SET vendor=%s, category=%s, subcategory=%s,
@@ -322,16 +347,16 @@ def process_file(conn, filepath, user_id):
     )
 
     # ----------------------------
-    # Step 6: MiniLM classification
+    # Step 6: MiniLM classification (ONLY pending/low-conf)
     # ----------------------------
-    pending = fetch_transactions_for_minilm(conn, statement_id)
-    print(f"[Pipeline] MiniLM evaluating {len(pending)} transactions...")
+    pending_bert = fetch_transactions_for_minilm(conn, statement_id)
+    print(f"[Pipeline] MiniLM evaluating {len(pending_bert)} transactions...")
 
-    mini_attempted = len(pending)
+    mini_attempted = len(pending_bert)
     mini_classified = 0
     mini_pending = 0
 
-    for txn in pending:
+    for txn in pending_bert:
         label = apply_minilm_to_txn(conn, txn)
         if label == "PENDING":
             mini_pending += 1
@@ -340,11 +365,36 @@ def process_file(conn, filepath, user_id):
 
     print(
         f"[Pipeline][MiniLM] attempted={mini_attempted}, "
-        f"classified={mini_classified}, remaining={mini_pending}"
+        f"classified={mini_classified}, remaining_for_llm={mini_pending}"
+    )
+
+    # Updated LLM Fallback (Step 7) in process_file
+
+    # ----------------------------
+    # Step 7: LLM Fallback (ONLY after MiniLM)
+    # ----------------------------
+    llm_pending = fetch_transactions_for_llm(conn, statement_id)
+    print(f"[Pipeline] LLM needs to process {len(llm_pending)} transactions...")
+
+    llm_attempted = len(llm_pending)
+    llm_classified = 0
+
+    for txn in llm_pending:
+        # Now 'cat' correctly receives the category string from apply_llm_to_txn
+        cat = apply_llm_to_txn(conn, txn) 
+        
+        # Count as classified if it's neither PENDING (default) nor UNCLEAR (LLM failure mode)
+        # For simplicity, we count anything that is not PENDING as classified.
+        if cat and cat != "PENDING" and cat != "UNCLEAR": # Optional: Exclude UNCLEAR as successful
+            llm_classified += 1
+
+    print(
+        f"[Pipeline][LLM] attempted={llm_attempted}, "
+        f"classified={llm_classified}"
     )
 
     # ----------------------------
-    # Step 7: Update final status
+    # Step 8: Update final status
     # ----------------------------
     update_document_status(conn, doc_id, "parsed")
 
@@ -352,25 +402,9 @@ def process_file(conn, filepath, user_id):
         "mini_attempted": mini_attempted,
         "mini_classified": mini_classified,
         "mini_pending": mini_pending,
+        "llm_attempted": llm_attempted,
+        "llm_classified": llm_classified,
     }
-    # # Step 7: Apply LLM Fallback (Day 5)
-    # llm_pending = fetch_transactions_for_llm(conn, statement_id)
-    # print(f"[Pipeline] LLM needs to process {len(llm_pending)} transactions...")
-
-    # for txn in llm_pending:
-    #     apply_llm_to_txn(conn, txn)
-
-    # print("[Pipeline] LLM Fallback classification complete.")
-    
-    # # Step 8: Update document status
-    # update_document_status(conn, doc_id, "parsed")
-
-    # return len(txn_ids)
-
-
-# ============================================================
-#  MAIN (process all PDFs in data/input)
-# ============================================================
 
 def main():
     input_dir = Path("./data/input")
@@ -386,6 +420,8 @@ def main():
     total_mini_attempted = 0
     total_mini_classified = 0
     total_mini_pending = 0
+    total_llm_attempted = 0
+    total_llm_classified = 0
 
     for pdf in pdf_files:
         processed, metrics = process_file(conn, pdf, DEFAULT_USER_ID)
@@ -393,17 +429,17 @@ def main():
         total_mini_attempted += metrics["mini_attempted"]
         total_mini_classified += metrics["mini_classified"]
         total_mini_pending += metrics["mini_pending"]
+        total_llm_attempted += metrics.get("llm_attempted", 0)
+        total_llm_classified += metrics.get("llm_classified", 0)
 
     conn.close()
 
     print("\n========= PIPELINE SUMMARY =========")
-    print(f"Total transactions inserted      : {total_txns}")
-    print(f"MiniLM attempted classifications : {total_mini_attempted}")
-    print(f"MiniLM classified (confident)    : {total_mini_classified}")
-    print(f"Remaining for LLM fallback       : {total_mini_pending}")
+    print(f"Total transactions inserted          : {total_txns}")
+    print(f"MiniLM attempted classifications     : {total_mini_attempted}")
+    print(f"MiniLM classified (confident)        : {total_mini_classified}")
+    print(f"Remaining for LLM (after MiniLM)     : {total_mini_pending}")
+    print(f"LLM attempted classifications        : {total_llm_attempted}")
+    print(f"LLM classified                       : {total_llm_classified}")
     print("====================================\n")
 
-
-
-if __name__ == "__main__":
-    main()
