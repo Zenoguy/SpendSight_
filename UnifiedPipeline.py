@@ -17,6 +17,19 @@ from psycopg2.extras import DictCursor
 from pathlib import Path
 from dotenv import load_dotenv
 import json
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GEMINI_API_KEY:
+    print("[LLM WARN] GEMINI_API_KEY missing while loading UnifiedPipeline.")
+else:
+    print("[LLM OK] GEMINI_API_KEY loaded successfully.")
+
+
 
 # Import  regex engine
 from regex_engine.regex_classifier import classify_with_regex
