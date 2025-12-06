@@ -1,62 +1,65 @@
-# nlp/taxonomy.py
-
 CATEGORIES = {
     "Dining.FoodDelivery": [
-        "zomato food order",
-        "swiggy food delivery",
-        "online food delivery",
-        "takeaway order from restaurant",
+        "Zomato order",
+        "Swiggy food delivery",
+        "Food from Zomato",
+        "Restaurant delivery",
+        "Online food order",
     ],
-    "Dining.Cafe": [
-        "coffee shop purchase",
-        "starbucks coffee",
-        "cafe coffee day visit",
-    ],
-    "Transport.Cab": [
-        "uber cab ride",
-        "ola cab trip",
-        "taxi fare",
-    ],
-    "Groceries": [
-        "grocery store purchase",
-        "supermarket shopping",
-        "bigbasket grocery order",
-        "dmart grocery purchase",
-    ],
-    "Fuel": [
-        "fuel station petrol",
-        "petrol pump payment",
-        "diesel refill",
-        "hp petrol station",
-        "indian oil fuel",
+    "Groceries.Online": [
+        "BigBasket groceries",
+        "Online grocery shopping",
+        "Blinkit groceries",
+        "Grocery order from BigBasket",
     ],
     "Shopping.Online": [
-        "amazon online order",
-        "flipkart purchase",
-        "myntra clothing order",
-        "ajio fashion shopping",
+        "Amazon online shopping",
+        "Flipkart purchase",
+        "Myntra fashion shopping",
+        "Online shopping from Amazon",
     ],
-    "Bills.Utilities": [
-        "electricity bill payment",
-        "water bill payment",
-        "mobile postpaid bill",
-        "internet broadband bill",
-        "dth recharge",
+    "Entertainment.Streaming": [
+        "Netflix subscription",
+        "Spotify subscription",
+        "Hotstar subscription",
+        "Amazon Prime Video subscription",
+    ],
+    "Transport.Cabs": [
+        "Uber ride payment",
+        "Ola cab fare",
+        "Rapido bike taxi",
+        "Cab ride online payment",
+    ],
+    "Utilities.Electricity": [
+        "Electricity bill payment",
+        "CESC electricity bill",
+    ],
+    "Utilities.Gas": [
+        "Gas bill payment",
+    ],
+    "Debt.LoanEMI": [
+        "EMI payment HDFC loan",
+        "Loan EMI deduction",
     ],
     "Income.Salary": [
-        "salary credited from employer",
-        "monthly payroll amount",
-        "salary credit to account",
+        "Salary credit from company",
+        "Monthly salary from ACME Corp",
     ],
-    "Transfer.Self": [
-        "fund transfer to own account",
-        "upi transfer to self",
-        "internal account transfer same customer",
+    "Income.Interest": [
+        "Interest paid on savings account",
+        "Quarterly interest credit",
     ],
-    "Fees.Charges": [
-        "bank charges debit",
-        "service charge",
-        "atm withdrawal fee",
-        "penalty charge",
+    "BankCharges.Fees": [
+        "Quarterly average balance charge",
+        "SMS service charge",
+        "Bank service charge",
+    ],
+    "Cash.ATMWithdrawal": [
+        "ATM cash withdrawal",
+        "ATM WDR Park Street",
+    ],
+    "Leisure.Gaming": [
+        "Dream11 online gaming",
+        "Fantasy sports payment",
     ],
 }
