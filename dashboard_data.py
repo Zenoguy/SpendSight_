@@ -55,58 +55,81 @@ def _build_params(user_id: str, start_date: Optional[date], end_date: Optional[d
 
 # ------------- Core aggregation functions ------------- #
 
-def get_category_spending(conn, user_id: str,
-                          start_date: Optional[date] = None,
-                          end_date: Optional[date] = None) -> List[Dict[str, Any]]:
+def get_category_spending(
+    conn,
+    user_id: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> List[Dict[str, Any]]:
     """
     Returns list of:
       { category: str, amount: float, percentage: float }
-    Only considers "spend" transactions (amount < 0) and excludes clear income categories.
+
+    Here "amount" is the **total spend** in that category:
+      - Only considers negative amounts (outflows) as spend
+      - Uses -amount to make it positive for charting
+      - Excludes Income and Transfers categories
     """
     date_filter = _date_range_filter(start_date, end_date)
     params = _build_params(user_id, start_date, end_date)
 
     with conn.cursor(cursor_factory=DictCursor) as cur:
-        # Sum negative amounts (expenses). We take ABS later in code.
         cur.execute(f"""
             SELECT
                 COALESCE(category, 'Uncategorized') AS category,
-                SUM(amount) AS total_amount
+                SUM(
+                    CASE
+                        WHEN amount < 0 THEN -amount
+                        ELSE 0
+                    END
+                ) AS total_spend
             FROM transactions
             WHERE user_id = %(user_id)s
-              AND amount < 0
+              AND amount IS NOT NULL
               AND (category IS NULL OR category NOT IN ('Income', 'Transfers'))
               {date_filter}
             GROUP BY COALESCE(category, 'Uncategorized')
-            ORDER BY SUM(amount) ASC;  -- more negative = more spend
+            HAVING SUM(
+                CASE
+                    WHEN amount < 0 THEN -amount
+                    ELSE 0
+                END
+            ) > 0
+            ORDER BY total_spend DESC;
         """, params)
 
         rows = cur.fetchall()
 
-    # Convert to positive "spent" values and percentages
-    totals = [abs(row["total_amount"] or 0) for row in rows]
+    totals = [float(row["total_spend"] or 0) for row in rows]
     total_spent = sum(totals) or 1.0  # avoid division by zero
 
-    result = []
+    result: List[Dict[str, Any]] = []
     for row in rows:
-        amt = abs(row["total_amount"] or 0)
+        amt = float(row["total_spend"] or 0)
         pct = (amt / total_spent) * 100.0
         result.append({
             "category": row["category"],
-            "amount": float(amt),
+            "amount": amt,          # positive spend
             "percentage": pct,
         })
 
     return result
 
 
-def get_monthly_spending(conn, user_id: str,
-                         start_date: Optional[date] = None,
-                         end_date: Optional[date] = None) -> List[Dict[str, Any]]:
+def get_monthly_spending(
+    conn,
+    user_id: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> List[Dict[str, Any]]:
     """
-    Returns list of:
-      { month: 'Jan', amount: float }
-    where amount is total spending in that month (positive number).
+    Returns:
+      [ { month: 'Jan', amount: float }, ... ]
+
+    Month-wise **spend**:
+      - Only negative amounts (outflows)
+      - Uses -amount to make numbers positive
+      - Excludes Income and Transfers categories
     """
     date_filter = _date_range_filter(start_date, end_date)
     params = _build_params(user_id, start_date, end_date)
@@ -115,40 +138,56 @@ def get_monthly_spending(conn, user_id: str,
         cur.execute(f"""
             SELECT
                 date_trunc('month', txn_date)::date AS month_start,
-                SUM(amount) AS total_amount
+                SUM(
+                    CASE
+                        WHEN amount < 0 THEN -amount
+                        ELSE 0
+                    END
+                ) AS total_spend
             FROM transactions
             WHERE user_id = %(user_id)s
-              AND amount < 0
+              AND amount IS NOT NULL
               AND (category IS NULL OR category NOT IN ('Income', 'Transfers'))
               {date_filter}
             GROUP BY date_trunc('month', txn_date)::date
+            HAVING SUM(
+                CASE
+                    WHEN amount < 0 THEN -amount
+                    ELSE 0
+                END
+            ) > 0
             ORDER BY month_start;
         """, params)
 
         rows = cur.fetchall()
 
-    result = []
+    result: List[Dict[str, Any]] = []
     for row in rows:
-        month_start = row["month_start"]  # date
-        amt = abs(row["total_amount"] or 0)
-        # 'Jan', 'Feb', etc. You can change format if needed.
-        month_label = month_start.strftime("%b")
+        month_start = row["month_start"]
+        amt = float(row["total_spend"] or 0)
+        month_label = month_start.strftime("%b")  # Jan, Feb, ...
         result.append({
             "month": month_label,
-            "amount": float(amt),
+            "amount": amt,          # positive spend
         })
     return result
 
 
-def get_top_vendors(conn, user_id: str,
-                    start_date: Optional[date] = None,
-                    end_date: Optional[date] = None,
-                    limit: int = 10) -> List[Dict[str, Any]]:
+def get_top_vendors(
+    conn,
+    user_id: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
     """
-    Returns list of:
-      { vendor: str, amount: float, transactions: int }
+    Returns:
+      [ { vendor: str, amount: float, transactions: int }, ... ]
 
-    'amount' here is total spent with that vendor (positive number).
+    'amount' = total spend for that vendor:
+      - Only negative amounts (outflows)
+      - Uses -amount to make it positive
+      - Excludes Income and Transfers categories
     """
     date_filter = _date_range_filter(start_date, end_date)
     params = _build_params(user_id, start_date, end_date)
@@ -158,45 +197,58 @@ def get_top_vendors(conn, user_id: str,
         cur.execute(f"""
             SELECT
                 COALESCE(vendor, 'Unknown') AS vendor,
-                SUM(amount) AS total_amount,
+                SUM(
+                    CASE
+                        WHEN amount < 0 THEN -amount
+                        ELSE 0
+                    END
+                ) AS total_spend,
                 COUNT(*) AS txn_count
             FROM transactions
             WHERE user_id = %(user_id)s
-              AND amount < 0
+              AND amount IS NOT NULL
               AND (category IS NULL OR category NOT IN ('Income', 'Transfers'))
               {date_filter}
             GROUP BY COALESCE(vendor, 'Unknown')
-            ORDER BY SUM(amount) ASC   -- more negative = more spend
+            HAVING SUM(
+                CASE
+                    WHEN amount < 0 THEN -amount
+                    ELSE 0
+                END
+            ) > 0
+            ORDER BY total_spend DESC
             LIMIT %(limit)s;
         """, params)
 
         rows = cur.fetchall()
 
-    result = []
+    result: List[Dict[str, Any]] = []
     for row in rows:
-        amt = abs(row["total_amount"] or 0)
+        amt = float(row["total_spend"] or 0)
         result.append({
             "vendor": row["vendor"],
-            "amount": float(amt),
+            "amount": amt,                  # positive spend
             "transactions": int(row["txn_count"]),
         })
     return result
 
 
-def get_summary_stats(conn, user_id: str,
-                      start_date: Optional[date] = None,
-                      end_date: Optional[date] = None) -> Dict[str, Any]:
+def get_summary_stats(
+    conn,
+    user_id: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> Dict[str, Any]:
     """
     Returns:
       {
-        "total_spent": float,
-        "total_transactions": int,
+        "total_spent": float,              # total *spend* across all categories
+        "total_transactions": int,         # all txns in range
         "top_category": { category, amount, percentage } or None
       }
     """
     category_spending = get_category_spending(conn, user_id, start_date, end_date)
     total_spent = sum(item["amount"] for item in category_spending)
-    total_transactions = 0
 
     date_filter = _date_range_filter(start_date, end_date)
     params = _build_params(user_id, start_date, end_date)
@@ -224,9 +276,11 @@ def get_summary_stats(conn, user_id: str,
 
 # ------------- Public API for Person C ------------- #
 
-def get_dashboard_data(user_id: Optional[str] = None,
-                       start_date: Optional[date] = None,
-                       end_date: Optional[date] = None) -> Dict[str, Any]:
+def get_dashboard_data(
+    user_id: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> Dict[str, Any]:
     """
     Main entrypoint for dashboard aggregation.
 

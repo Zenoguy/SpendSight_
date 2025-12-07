@@ -111,7 +111,7 @@ def parse_statement(filepath):
             return "SBI", parse_sbi(pdf, filepath)
         if "federal bank" in first:
             return "Federal Bank", parse_federal_bank(pdf, filepath)
-
+        
         return None, []
 
 # --------------------------------------------------------
@@ -138,9 +138,19 @@ def parse_date(raw):
         except:
             pass
     return None
+from decimal import Decimal  # at top of file, if not already imported
 
 
 def normalize_txn(tx, statement_id, user_id):
+    """
+    Normalize a raw parsed transaction into the canonical schema.
+
+    - Tries 'amount' first (to preserve existing behaviour if it works)
+    - If that is zero / empty, falls back to typical debit/credit fields
+    - Outflows (debits / withdrawals) are stored as NEGATIVE
+    - Inflows (credits / deposits / salary / interest) as POSITIVE
+    """
+
     raw_date = str(tx.get("date", "")).strip()
     if not raw_date or len(raw_date) < 4:
         return None
@@ -150,20 +160,94 @@ def normalize_txn(tx, statement_id, user_id):
         return None
 
     desc = tx.get("description", "").strip()
+
+    # 1) Primary: use tx["amount"] if it is non-zero
     amt = clean_amount(tx.get("amount"))
+    if amt is None:
+        amt = Decimal("0.00")
+
+    # If parser already gave a valid non-zero amount, trust it
+    if amt != 0:
+        signed_amount = amt
+        amount_source = "amount"
+    else:
+        # 2) Fallback: infer from typical debit / credit style fields
+        signed_amount, amount_source = _infer_amount_from_raw_fields(tx)
+
+    # Optional: debug once in a while
+    # print("NORMALIZED TX:", desc[:60], "| raw:", tx, "| amt:", signed_amount, "| src:", amount_source)
 
     return {
         "user_id": user_id,
         "statement_id": statement_id,
         "txn_date": d,
         "description_raw": desc,
-        "amount": amt,
+        "amount": signed_amount,
         "vendor": None,
         "category": None,
         "subcategory": None,
         "confidence": 0.0,
         "classification_source": None,
     }
+
+
+def _infer_amount_from_raw_fields(tx):
+    """
+    Try to derive a signed amount from common raw fields.
+
+    Convention:
+      - Debits / withdrawals -> NEGATIVE
+      - Credits / deposits / salary / interest -> POSITIVE
+
+    Returns:
+      (Decimal amount, source_key: str | None)
+    """
+    # Helper to check a raw field is "non-empty"
+    def _has_value(v):
+        return v not in (None, "", "-", " ", "\u00a0")
+
+    # 1) Debit-like fields (money going OUT)
+    debit_keys = [
+        "debit",
+        "withdrawal",
+        "withdrawal_amount",
+        "debit_amount",
+        "dr_amount",
+        "dr",
+    ]
+
+    for key in debit_keys:
+        if _has_value(tx.get(key)):
+            raw = tx.get(key)
+            amt = clean_amount(raw)
+            try:
+                amt = abs(amt)
+            except Exception:
+                amt = Decimal("0.00")
+            return -amt, key  # store as NEGATIVE
+
+    # 2) Credit-like fields (money coming IN)
+    credit_keys = [
+        "credit",
+        "deposit",
+        "deposit_amount",
+        "credit_amount",
+        "cr_amount",
+        "cr",
+    ]
+
+    for key in credit_keys:
+        if _has_value(tx.get(key)):
+            raw = tx.get(key)
+            amt = clean_amount(raw)
+            try:
+                amt = abs(amt)
+            except Exception:
+                amt = Decimal("0.00")
+            return amt, key  # store as POSITIVE
+
+    # 3) Absolute fallback: if *nothing* is present, return 0.00
+    return Decimal("0.00"), None
 
 # --------------------------------------------------------
 # MAIN PIPELINE PER FILE
