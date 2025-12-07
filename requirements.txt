@@ -30,3 +30,8 @@ pgvector==0.2.5          # Python adapter for pgvector extension
 
 # --- For llms call ------
 google-genai pydantic
+
+# ---- Visualization for analysis -----
+seaborn
+pandas
+matplotlib
