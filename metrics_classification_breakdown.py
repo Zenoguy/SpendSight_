@@ -12,28 +12,33 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 def get_conn():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL not set")
-    # Note: Using DB connection details from .env (not DATABASE_URL) if psycopg2.connect 
-    # only accepts the standard parameters. Adjust if needed.
     return psycopg2.connect(DATABASE_URL)
 
 
 def main():
     conn = get_conn()
     with conn.cursor(cursor_factory=DictCursor) as cur:
-        # Total
+
+        # =========================================================
+        # TOTAL TRANSACTIONS
+        # =========================================================
         cur.execute("SELECT COUNT(*) AS c FROM transactions;")
         total = cur.fetchone()["c"]
 
-        # By classification_source
+        # =========================================================
+        # CLASSIFICATION SOURCE BREAKDOWN
+        # =========================================================
         cur.execute("""
-            SELECT classification_source, COUNT(*) AS c
+            SELECT COALESCE(classification_source::text, 'NULL') AS source, COUNT(*) AS c
             FROM transactions
-            GROUP BY classification_source
-            ORDER BY classification_source;
+            GROUP BY source
+            ORDER BY source;
         """)
         by_source = cur.fetchall()
 
-        # Regex with decent confidence (e.g., >= 0.8)
+        # =========================================================
+        # REGEX PERFORMANCE
+        # =========================================================
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
@@ -42,19 +47,44 @@ def main():
         """)
         regex_strong = cur.fetchone()["c"]
 
-        # Regex that "failed" (still PENDING after regex)
-        # NOTE: This query is flawed as transactions are only 'PENDING' *before* classification.
-        # It should count transactions passed to BERT/LLM based on classification_source != 'regex'
-        # For simplicity, we keep the original PENDING check but note its limitation.
+        # Regex failed = regex assigned but still PENDING
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
             WHERE classification_source = 'regex'
-              AND (category = 'PENDING' OR category IS NULL);
+              AND category = 'PENDING';
         """)
         regex_failed = cur.fetchone()["c"]
 
-        # Bert (MiniLM) strong classifications
+        # =========================================================
+        # HEURISTICS PERFORMANCE
+        # =========================================================
+        cur.execute("""
+            SELECT COUNT(*) AS c
+            FROM transactions
+            WHERE classification_source = 'heuristic';
+        """)
+        heur_total = cur.fetchone()["c"]
+
+        cur.execute("""
+            SELECT COUNT(*) AS c
+            FROM transactions
+            WHERE classification_source = 'heuristic'
+              AND confidence >= 0.6;
+        """)
+        heur_strong = cur.fetchone()["c"]
+
+        cur.execute("""
+            SELECT COUNT(*) AS c
+            FROM transactions
+            WHERE classification_source = 'heuristic'
+              AND category = 'PENDING';
+        """)
+        heur_failed = cur.fetchone()["c"]
+
+        # =========================================================
+        # MiniLM (BERT) PERFORMANCE
+        # =========================================================
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
@@ -63,11 +93,9 @@ def main():
         """)
         bert_strong = cur.fetchone()["c"]
 
-        # ----------------------------------------------------------------
-        # NEW: LLM Fallback Metrics
-        # ----------------------------------------------------------------
-
-        # LLM strong classifications (typically >= 0.9 for high-cost fallback)
+        # =========================================================
+        # LLM PERFORMANCE
+        # =========================================================
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
@@ -76,50 +104,61 @@ def main():
         """)
         llm_strong = cur.fetchone()["c"]
 
-        # LLM 'failed' (classified by LLM but still low confidence or 'UNCLEAR')
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
             WHERE classification_source = 'llm'
               AND confidence < 0.8;
         """)
-        llm_low_confidence = cur.fetchone()["c"]
+        llm_low_conf = cur.fetchone()["c"]
 
-        # Still pending after all stages (Unclassified by all 3)
+        # =========================================================
+        # FINAL PENDING
+        # =========================================================
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
             WHERE category = 'PENDING'
-                OR category IS NULL;
+               OR category IS NULL;
         """)
         pending_all = cur.fetchone()["c"]
 
     conn.close()
 
-    print("=========== Classification Breakdown ===========")
+    # =========================================================
+    # PRINT METRICS
+    # =========================================================
+    print("\n=========== Classification Breakdown ===========")
     print(f"Total transactions: {total}")
-    
+
     print("\nBy classification_source:")
     for row in by_source:
-        print(f"  {row['classification_source'] or 'NULL':>6}: {row['c']}")
+        print(f"  {row['source']:>10}: {row['c']}")
 
+    # -----------------------------
     print("\nRegex performance:")
-    print(f"  Strong regex (conf >= 0.8): {regex_strong}")
-    print(f"  Regex 'failed' (still PENDING): {regex_failed}")
+    print(f"  Strong regex (conf ≥ 0.8): {regex_strong}")
+    print(f"  Regex failed (still PENDING): {regex_failed}")
 
-    print("\nMiniLM performance:")
-    print(f"  Strong bert (conf >= 0.6): {bert_strong}")
-    
-    # ----------------------------------------------------------------
-    # NEW: LLM Performance Output
-    # ----------------------------------------------------------------
+    # -----------------------------
+    print("\nHeuristics performance:")
+    print(f"  Total heuristics classified: {heur_total}")
+    print(f"  Strong heuristics (conf ≥ 0.6): {heur_strong}")
+    print(f"  Heuristics failed (still PENDING): {heur_failed}")
+
+    # -----------------------------
+    print("\nMiniLM (BERT) performance:")
+    print(f"  Strong MiniLM (conf ≥ 0.6): {bert_strong}")
+
+    # -----------------------------
     print("\nLLM performance:")
-    print(f"  Strong LLM (conf >= 0.9): {llm_strong}")
-    print(f"  LLM low confidence (< 0.8): {llm_low_confidence}")
+    print(f"  Strong LLM (conf ≥ 0.9): {llm_strong}")
+    print(f"  LLM low confidence (< 0.8): {llm_low_conf}")
 
-    print("\nOverall remaining PENDING (Unclassified):")
+    # -----------------------------
+    print("\nFINAL: Remaining PENDING after ALL stages:")
     print(f"  Pending: {pending_all}")
-    print("===============================================")
+    print("===============================================\n")
 
 
 if __name__ == "__main__":

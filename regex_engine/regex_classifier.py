@@ -3,11 +3,12 @@
 import re
 from regex_engine.category_rules import CATEGORY_REGEX
 from regex_engine.vendor_rules import VENDOR_REGEX
-from regex_engine.vendor_map import VENDOR_CATEGORY_MAP  # <- you said you added this
+from regex_engine.vendor_map import VENDOR_CATEGORY_MAP
+from regex_engine.upi_utils import classify_upi   # 👈 NEW import
 
 
 # ----------------------------------------------------
-# Description normalizer (already added by you)
+# Description normalizer
 # ----------------------------------------------------
 def normalize_desc(desc: str) -> str:
     if not desc:
@@ -27,7 +28,7 @@ def normalize_desc(desc: str) -> str:
         "MOBILERECHARGE": "MOBILE RECHARGE",
         "LATEFINEFEES": "LATE FINE FEES",
         "VLPCHARGES": "VLP CHARGES",
-        "TRANSFERTOANIL": "TRANSFER TO ANIL",  # if you want cleaner text for LLM/MiniLM
+        "TRANSFERTOANIL": "TRANSFER TO ANIL",
     }
     for bad, good in glue_fixes.items():
         d = d.replace(bad, good)
@@ -44,17 +45,14 @@ def normalize_desc(desc: str) -> str:
 
     return d
 
+
 # ----------------------------------------------------
-# Precomputed vendor keys (for fast substring search)
+# Vendor map helpers
 # ----------------------------------------------------
 VENDOR_KEYS = sorted(VENDOR_CATEGORY_MAP.keys(), key=len, reverse=True)
 
 
 def extract_vendor_from_map(desc_norm: str) -> str | None:
-    """
-    Try to find a vendor key from VENDOR_CATEGORY_MAP
-    inside the normalized description (uppercased).
-    """
     for key in VENDOR_KEYS:
         if key in desc_norm:
             return key
@@ -104,6 +102,16 @@ def classify_with_regex(description: str):
     confidence: float = 0.0
 
     # ------------------------------------------------
+    # 0) UPI-specific extractor (NEW, very early)
+    # ------------------------------------------------
+    upi_cat, upi_sub, upi_vendor, upi_conf, upi_meta = classify_upi(text_norm)
+    if upi_cat is not None:
+        meta.update(upi_meta)
+        # If you want to tag this explicitly:
+        meta.setdefault("matched_rule", "upi")
+        return upi_cat, upi_sub, upi_vendor, upi_conf, meta
+
+    # ------------------------------------------------
     # 1) Vendor-based classification via vendor_map
     # ------------------------------------------------
     vendor_key = extract_vendor_from_map(text_norm)
@@ -112,21 +120,14 @@ def classify_with_regex(description: str):
 
         category = cat
         subcategory = subcat
-        # Pretty vendor name
         vendor = vendor_key.title()
         confidence = 0.9
         meta["matched_rule"] = "vendor_map"
         meta["vendor_key"] = vendor_key
 
-        # NOTE: we *still* allow salary/EMI/etc. below to override if needed.
-        # For most merchants, this is enough.
-        # Fall through intentionally.
-
     # ------------------------------------------------
     # 2) Non-vendor semantic rules (salary, EMI, ATM, etc.)
     # ------------------------------------------------
-    # These can override vendor_map if they hit.
-
     if SALARY_RE.search(text_norm):
         category = "Income"
         subcategory = "Salary"
@@ -198,7 +199,7 @@ def classify_with_regex(description: str):
         meta["matched_rule"] = "govt_insurance"
 
     # ------------------------------------------------
-    # 3) Fallback to your existing CATEGORY_REGEX
+    # 3) Fallback to CATEGORY_REGEX
     # ------------------------------------------------
     if category is None:
         for cat_label, patterns in CATEGORY_REGEX.items():
@@ -215,7 +216,7 @@ def classify_with_regex(description: str):
                 break
 
     # ------------------------------------------------
-    # 4) Fallback vendor detection using VENDOR_REGEX (your old rules)
+    # 4) Fallback vendor detection using VENDOR_REGEX
     # ------------------------------------------------
     if vendor is None:
         for vendor_name, patterns in VENDOR_REGEX.items():
@@ -224,7 +225,6 @@ def classify_with_regex(description: str):
                     vendor = vendor_name
                     meta["vendor_hit"] = pat
                     meta["matched_rule"] = meta.get("matched_rule", "vendor_regex")
-                    # if no category yet, at least mark as something generic
                     if category is None:
                         category = "Uncategorized"
                     confidence = max(confidence, 0.7)
@@ -238,7 +238,6 @@ def classify_with_regex(description: str):
     if category is None:
         category = "PENDING"
         subcategory = None
-        vendor = vendor  # maybe detected vendor only
         confidence = 0.0
         meta.setdefault("reason", "no_regex_match")
 

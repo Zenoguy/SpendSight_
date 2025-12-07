@@ -44,6 +44,9 @@ from PipeLine import (
 # --- Regex classifier ---
 from regex_engine.regex_classifier import classify_with_regex
 
+# --- Heuristics classifier ---
+from heuristics.heuristics_classifier import classify_with_heuristics
+
 # --- MiniLM classifier ---
 from nlp.miniLM_classifier import MiniLMClassifier
 
@@ -63,6 +66,7 @@ print("[Pipeline] MiniLM classifier initialized.")
 #  Fetch transactions requiring MiniLM classification
 # ============================================================
 
+
 def fetch_transactions_for_minilm(conn, statement_id):
     """
     Returns transactions that require MiniLM classification:
@@ -77,13 +81,13 @@ def fetch_transactions_for_minilm(conn, statement_id):
           AND (
                category IS NULL
             OR category = 'PENDING'
-            OR (classification_source = 'regex' AND confidence < 0.75)
+            OR (classification_source IN ('regex','heuristic') AND confidence < 0.50)
+
           );
     """
     with conn.cursor(cursor_factory=DictCursor) as cur:
         cur.execute(q, (statement_id,))
         return cur.fetchall()
-
 
 # ---------------------------------------------------------------------
 # CHECK IF STATEMENT ALREADY EXISTS (IDEMPOTENCY FIX)
@@ -159,7 +163,7 @@ def fetch_transactions_for_llm(conn, statement_id):
     Fetches transactions that are still PENDING or where the BERT classification
     confidence is below the LLM fallback threshold.
     """
-    LLM_FALLBACK_THRESHOLD = 0.50
+    LLM_FALLBACK_THRESHOLD = 0.25
 
     query = """
     SELECT txn_id, description_clean, description_raw, category, confidence
@@ -244,6 +248,7 @@ def process_file(conn, filepath, user_id):
 
         # 1) MiniLM on remaining / low-confidence
         pending_bert = fetch_transactions_for_minilm(conn, existing_statement_id)
+        
         print(f"[Pipeline] MiniLM needs to process {len(pending_bert)} transactions...")
 
         mini_attempted = len(pending_bert)
@@ -290,6 +295,8 @@ def process_file(conn, filepath, user_id):
     if not bank_name or not raw_txns:
         print("[WARN] No transactions parsed or unknown bank. Skipping.")
         return 0, {
+            "heur_attempted": 0,
+            "heur_classified": 0,
             "mini_attempted": 0,
             "mini_classified": 0,
             "mini_pending": 0,
@@ -355,6 +362,46 @@ def process_file(conn, filepath, user_id):
         f"[Pipeline][Regex] attempted={regex_attempted}, "
         f"classified={regex_classified}, failed={regex_failed}"
     )
+    # ----------------------------
+    # Step 5b: Heuristics classifier (ONLY for regex failures)
+    # ----------------------------
+    q_pending_for_heuristics = """
+        SELECT txn_id, description_clean, description_raw
+        FROM transactions
+        WHERE statement_id = %s
+          AND (category IS NULL OR category = 'PENDING');
+    """
+    with conn.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute(q_pending_for_heuristics, (statement_id,))
+        pending_heur = cur.fetchall()
+
+    heur_attempted = len(pending_heur)
+    heur_classified = 0
+
+    for txn in pending_heur:
+        desc = txn["description_clean"] or txn["description_raw"] or ""
+        cat, sub, conf, meta = classify_with_heuristics(desc)
+
+        if cat != "PENDING":
+            heur_classified += 1
+
+            q = """
+            UPDATE transactions
+            SET category=%s, subcategory=%s, confidence=%s,
+                classification_source='heuristic'
+            WHERE txn_id=%s
+            """
+            with conn.cursor() as cur_update:
+                cur_update.execute(q, (cat, sub, conf, txn["txn_id"]))
+            conn.commit()
+
+            prediction = f"{cat}.{sub}" if sub else cat
+            insert_classification_log(conn, txn["txn_id"], "heuristic", prediction, conf, meta)
+
+    print(
+        f"[Pipeline][Heuristics] attempted={heur_attempted}, "
+        f"classified={heur_classified}, failed={heur_attempted - heur_classified}"
+    )
 
     # ----------------------------
     # Step 6: MiniLM classification (ONLY pending/low-conf)
@@ -397,6 +444,8 @@ def process_file(conn, filepath, user_id):
     update_document_status(conn, doc_id, "parsed")
 
     return len(txn_ids), {
+        "heur_attempted": heur_attempted,
+        "heur_classified": heur_classified,
         "mini_attempted": mini_attempted,
         "mini_classified": mini_classified,
         "mini_pending": mini_pending,
@@ -416,6 +465,8 @@ def main():
     conn = get_db_connection()
 
     total_txns = 0
+    total_heur_attempted = 0
+    total_heur_classified = 0
     total_mini_attempted = 0
     total_mini_classified = 0
     total_mini_pending = 0
@@ -425,16 +476,25 @@ def main():
     for pdf in pdf_files:
         processed, metrics = process_file(conn, pdf, DEFAULT_USER_ID)
         total_txns += processed
-        total_mini_attempted += metrics["mini_attempted"]
-        total_mini_classified += metrics["mini_classified"]
-        total_mini_pending += metrics["mini_pending"]
+
+        total_heur_attempted += metrics.get("heur_attempted", 0)
+        total_heur_classified += metrics.get("heur_classified", 0)
+
+        total_mini_attempted += metrics.get("mini_attempted", 0)
+        total_mini_classified += metrics.get("mini_classified", 0)
+        total_mini_pending += metrics.get("mini_pending", 0)
+
         total_llm_attempted += metrics.get("llm_attempted", 0)
         total_llm_classified += metrics.get("llm_classified", 0)
+
 
     conn.close()
 
     print("\n========= PIPELINE SUMMARY =========")
     print(f"Total transactions inserted          : {total_txns}")
+    print(f"Heuristics attempted classifications : {total_heur_attempted}")
+    print(f"Heuristics classified                : {total_heur_classified}")
+
     print(f"MiniLM attempted classifications     : {total_mini_attempted}")
     print(f"MiniLM classified (confident)        : {total_mini_classified}")
     print(f"Remaining for LLM (after MiniLM)     : {total_mini_pending}")
