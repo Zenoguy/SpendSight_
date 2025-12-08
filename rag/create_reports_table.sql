@@ -1,0 +1,12 @@
+-- Existing reports table schema (already created in database)
+-- No need to run this - table already exists with these columns:
+--
+-- report_id: UUID PRIMARY KEY
+-- user_id: UUID NOT NULL
+-- period: TEXT (format: YYYY-MM)
+-- summary_json: JSONB (stores query and metadata)
+-- insights: TEXT (stores the generated report content)
+-- file_path: TEXT (optional)
+-- pdf_url: TEXT (URL to the generated PDF)
+-- report_type: TEXT (e.g., 'RAG_GENERATED')
+-- created_at: TIMESTAMP WITH TIME ZONE
