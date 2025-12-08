@@ -34,7 +34,9 @@ CREATE TABLE users (
     email         TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     bucket_path   TEXT,
-    created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    tier          TEXT DEFAULT 'free'
+
 );
 
 -- =========================================

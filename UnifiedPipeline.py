@@ -24,7 +24,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from psycopg2.extras import DictCursor
-
+from datetime import date
+from reports_dashboard import save_dashboard_snapshot
 # --- Load environment variables ---
 load_dotenv()
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID")
@@ -452,8 +453,6 @@ def process_file(conn, filepath, user_id):
         "llm_attempted": llm_attempted,
         "llm_classified": llm_classified,
     }
-
-
 def main():
     input_dir = Path("./data/input")
     pdf_files = sorted([str(p) for p in input_dir.glob("*.pdf")])
@@ -487,7 +486,6 @@ def main():
         total_llm_attempted += metrics.get("llm_attempted", 0)
         total_llm_classified += metrics.get("llm_classified", 0)
 
-
     conn.close()
 
     print("\n========= PIPELINE SUMMARY =========")
@@ -501,6 +499,25 @@ def main():
     print(f"LLM attempted classifications        : {total_llm_attempted}")
     print(f"LLM classified                       : {total_llm_classified}")
     print("====================================\n")
+
+    # ----------------------------------------
+    # After pipeline: store dashboard snapshot
+    # ----------------------------------------
+    if DEFAULT_USER_ID:
+        period_label = "lifetime_till_today"  # you can change to '2023-04_to_2024-03', etc.
+        try:
+            report_id = save_dashboard_snapshot(
+                user_id=DEFAULT_USER_ID,
+                period=period_label,
+                start_date=None,   # full history for now
+                end_date=None,
+            )
+            print(f"[Reports] Dashboard snapshot saved "
+                  f"(user={DEFAULT_USER_ID}, period={period_label}, report_id={report_id})")
+        except Exception as e:
+            print(f"[Reports][WARN] Failed to save dashboard snapshot: {e}")
+    else:
+        print("[Reports][WARN] DEFAULT_USER_ID not set; skipping dashboard snapshot.")
 
 
 if __name__ == "__main__":
