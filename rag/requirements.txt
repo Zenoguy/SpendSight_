@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+python-dotenv
+langchain
+langchain-core
+langchain-text-splitters
+langchain-groq
+langchain-community
+faiss-cpu
+sentence-transformers
+reportlab
+requests

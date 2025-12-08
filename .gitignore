@@ -5,7 +5,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
-
+ocr/.env
+rag/.env
+.env*
 # ========================================
 # Virtual environments (local/venv and conda)
 # ========================================
