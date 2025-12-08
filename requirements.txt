@@ -1,8 +1,9 @@
+# use Py3.12 compatibility
 # --- CORE PDF PROCESSING ---
 pdfplumber==0.10.3
-PyMuPDF==1.24.1         # optional, but useful for OCR fallback + text extraction
+PyMuPDF==1.24.9   
 
-# --- OCR (optional; comment out if not needed yet) ---
+# --- OCR ---
 pytesseract==0.3.10
 Pillow==10.3.0
 
@@ -13,25 +14,22 @@ psycopg2-binary==2.9.9
 pandas==2.2.1
 numpy==1.26.4
 
-# --- MACHINE LEARNING (for Day 3-4 classification pipeline) ---
+# --- MACHINE LEARNING ---
 transformers==4.39.0
-torch==2.2.1
-scikit-learn==1.4.1
+# download torch according to your system
+scikit-learn==1.5.2      # updated for Py3.12
 sentence-transformers
+
+# --- API / BACKEND ---
+fastapi==0.111.0
+uvicorn==0.30.0
+
 # --- UTILS ---
 python-dotenv==1.0.1
 tqdm==4.66.2
 
-# --- VISUALIZATION (optional) ---
+# --- VISUALIZATION ---
 matplotlib==3.8.3
 
-# --- RAG (optional if you enable pgvector) ---
-pgvector==0.2.5          # Python adapter for pgvector extension
-
-# --- For llms call ------
-google-genai pydantic
-
-# ---- Visualization for analysis -----
-seaborn
-pandas
-matplotlib
+# --- RAG / VECTOR DB ---
+pgvector==0.2.5
