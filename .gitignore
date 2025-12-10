@@ -63,6 +63,9 @@ data/cache/
 parsed/
 exports/
 .env
+data/input/*.pdf
+pgdata/
+
 # ========================================
 # Database stuff
 # ========================================

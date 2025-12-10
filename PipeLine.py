@@ -16,6 +16,10 @@ from parsers.bob import parse_bob
 from parsers.pnb import parse_pnb
 from parsers.sbi import parse_sbi
 from parsers.federal import parse_federal_bank
+from parsers.idbi import parse_idbi
+from parsers.parse_ocr_generic import parse_ocr_generic
+from parsers.icici import parse_icici
+
 
 load_dotenv()
 
@@ -114,16 +118,20 @@ def parse_statement(filepath):
             return "SBI", parse_sbi(pdf, filepath)
         if "federal bank" in first:
             return "Federal Bank", parse_federal_bank(pdf, filepath)
+        if "ICICI Bank" in first:
+            return "ICICI Bank", parse_icici(pdf, filepath)
+        if "IDBI Bank" in first:
+            return "IDBI Bank", parse_idbi(pdf, filepath)
 
-        # OCR / generic
-        if "_ocr_" in filename or "spendsight ocr" in first:
-            txns = parse_generic_ocr_statement(pdf, filepath)
-            return "GENERIC_OCR", txns
+        # # OCR / generic
+        # if "_ocr_" in filename or "spendsight ocr" in first:
+        #     txns = parse_ocr_generic(text=)
+        #     return "GENERIC_OCR", txns
 
-        # final fallback
-        txns = parse_generic_ocr_statement(pdf, filepath)
-        if txns:
-            return "GENERIC_OCR", txns
+        # # final fallback
+        # txns = parse_ocr_generic()
+        # if txns:
+        #     return "GENERIC_OCR", txns
 
         return None, []
 
@@ -164,84 +172,7 @@ def _try_parse_date(s: str):
             continue
     return None
 
-def parse_generic_ocr_statement(pdf, filepath):
-    """
-    Generic line-based parser for OCR-generated PDFs.
 
-    Tries to detect:
-      [DATE]  [DESCRIPTION ...]  [AMOUNT] [optional DR/CR]
-    Returns list of dicts: {date, description, amount}
-    compatible with normalize_txn().
-    """
-    transactions = []
-
-    # Pre-compile regex for speed
-    date_regexes = [re.compile(p) for p in DATE_PATTERNS]
-    amount_regex = re.compile(AMOUNT_PATTERN)
-
-    for page in pdf.pages:
-        text = page.extract_text() or ""
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            # 1) Find date
-            date_match = None
-            for dr in date_regexes:
-                m = dr.search(line)
-                if m:
-                    date_match = m
-                    break
-            if not date_match:
-                continue
-
-            date_str = date_match.group("date")
-            txn_date = _try_parse_date(date_str)
-            if not txn_date:
-                continue
-
-            # 2) Find amount (usually near the end of the line)
-            amount_match = None
-            # search from the right side by reversing the string is overkill,
-            # but scanning normally and taking the last match works fine.
-            for m in amount_regex.finditer(line):
-                amount_match = m
-            if not amount_match:
-                continue
-
-            amount_str = amount_match.group("amount")
-
-            # 3) Description is "between" date and amount
-            start_desc = date_match.end()
-            end_desc = amount_match.start()
-            desc = line[start_desc:end_desc].strip()
-
-            # 4) Detect credit/debit sign
-            trailing_part = line[amount_match.end():].lower()
-            leading_part = line[:date_match.start()].lower()
-            sign = -1  # assume spend by default
-
-            # Try to spot CR/DR markers
-            if "cr" in trailing_part or "credit" in trailing_part:
-                sign = +1
-            elif "dr" in trailing_part or "debit" in trailing_part:
-                sign = -1
-
-            try:
-                amt = float(amount_str.replace(",", ""))
-            except ValueError:
-                continue
-
-            amount_signed = sign * amt
-
-            transactions.append({
-                "date": txn_date,
-                "description": desc or line,  # fallback to whole line
-                "amount": amount_signed,
-            })
-
-    return transactions
 def normalize_txn(tx, statement_id, user_id):
     """
     Normalize a raw parsed transaction into the canonical schema.
