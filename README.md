@@ -47,39 +47,7 @@ This repository contains all components required for ingestion, classification, 
 
 * Per-user vector store embeddings
 * Natural-language Q&A over transactions + summaries
-
----
-
-# 📁 Repository Structure
-
-
-SpendSight/
-│
-├── UnifiedPipeline.py        # Main ingestion + classification pipeline
-├── PipeLine.py               # Parsers, DB operations, normalization
-├── ocr/                      # OCR subsystem (FastAPI server)
-│   ├── main.py               # OCR upload endpoint
-│   ├── ocr_utils.py
-│   ├── vercel_blob.py
-│   ├── supabase_storage.py
-│   └── models.py
-│
-├── regex_engine/             # Regex-based rule classifier
-├── heuristics/               # Heuristic fallback classifier
-├── nlp/
-│   └── miniLM_classifier.py  # Local semantic classifier
-├── llm/
-│   └── llm_classifier.py     # Gemini fallback classifier
-│
-├── dashboard_data.py         # Aggregation for dashboard UI
-├── reports_dashboard.py      # Stores snapshots to DB
-├── pipeline_visuals.py       # Generates funnel, workload, ROI charts
-│
-└── data/
-    ├── input/                # PDFs to be processed
-    └── reports/              # Pipeline metrics charts
-
-
+  
 ---
 
 # ⚙ Installation
@@ -238,7 +206,6 @@ SpendSight is designed with financial-grade constraints:
 
 # 🧭 Roadmap
 
-* Fine-tuned domain-specific BERT model
 * Incremental learning pipeline for MiniLM
 * New bank parsers (ICICI, HDFC, Axis)
 * Real-time user alert engine
