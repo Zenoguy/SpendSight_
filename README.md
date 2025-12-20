@@ -1,5 +1,7 @@
 # SpendSight: Automated Financial Document Intelligence
-
+![GitHub stars](https://img.shields.io/github/stars/Zenoguy/ZenoGuy_Portfolio?style=for-the-badge)
+![GitHub forks](https://img.shields.io/github/forks/Zenoguy/ZenoGuy_Portfolio?style=for-the-badge)
+![GitHub last commit](https://img.shields.io/github/last-commit/Zenoguy/ZenoGuy_Portfolio?style=for-the-badge)
 A Hybrid Rule-Based + ML + LLM System for Transaction Extraction, Categorization & Insights
 
 SpendSight is an end-to-end financial document processing system that parses bank statements and OCR-extracted PDFs, normalizes transactions, classifies them using a hybrid pipeline (Regex → Heuristics → MiniLM → LLM fallback), stores them securely in a relational database, and generates AI-driven dashboards and user-query insights using RAG.
