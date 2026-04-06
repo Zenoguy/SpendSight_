@@ -1,15 +1,17 @@
-# heuristics/heuristics_classifier.py
-
 """
 Lightweight keyword-based heuristic classifier.
 This is Stage-2 of the pipeline:
-    Regex (strict) → Heuristics → MiniLM → LLM
+    Regex (strict) -> Heuristics -> MiniLM -> LLM
 
-This upgraded version:
- - expands keyword lists (UPI, wallets, banks, merchants, utilities, fuel, travel, etc.)
- - uses simple regex for common patterns
- - returns (category, subcategory, confidence, meta) like before
- - meta contains matched_rule, matched_token and helpful context
+Upgrades made:
+ - expanded keyword lists and improved vendor matching
+ - better handling for UPI merchant payments vs P2P transfers
+ - explicit detection for EMI/loan repayments (EMIPAYMENT, HDFC-LOAN, etc.)
+ - stronger POS/card parsing for fuel, groceries, dining
+ - improved meta with matched_rule, matched_token, and context snippet
+ - small numeric parsing robustness
+
+Returns (category, subcategory, confidence, meta) like before
 """
 
 import re
@@ -20,126 +22,153 @@ def normalize(desc: str) -> str:
     return (desc or "").strip().lower()
 
 # precompile common regexes
-UPI_RE = re.compile(r'\bupi\b|upi/|ip[a,y]y|paytm|phonepe|googlepay|gpay|bhim|sbipay|sbiepay|eship|ipayment', re.I)
-CARD_RE = re.compile(r'\b(debit card|credit card|visa-pos|visa-ref|mastercard|pos|atm)\b', re.I)
-BANK_TRANSFER_RE = re.compile(r'\b(imps|neft|rtgs|fund transfer|transfer from|transfer to|mmid)\b', re.I)
-TXN_REF_RE = re.compile(r'\b(ref|txn|trn|utr|id0|id064|bn\d{3,})', re.I)
+UPI_RE = re.compile(r'\bupi\b|upi/|ipay|ipay|ip[a,y]y|paytm|phonepe|googlepay|gpay|bhim|sbipay|sbiepay|eship|ipayment', re.I)
+CARD_RE = re.compile(r'\b(debit card|credit card|visa-pos|visa-ref|mastercard|pos|atm|debitcard|visapos|visa pos|master card)\b', re.I)
+BANK_TRANSFER_RE = re.compile(r'\b(imps|neft|rtgs|fund transfer|transfer from|transfer to|mmid|imps/|neft/|rtgs/)\b', re.I)
+TXN_REF_RE = re.compile(r'\b(ref|txn|trn|utr|id0|id064|bn\d{3,}|txnid|txn id)\b', re.I)
 VENDOR_NUMBER_RE = re.compile(r'(\b\d{6,}\b)')  # long numeric tokens often part of refs
-AMOUNT_RE = re.compile(r'[\d,]+\.\d{2}')  # crude amount detector
+AMOUNT_RE = re.compile(r'[\d,]+\.?\d*')  # crude amount detector - more permissive
 
 # vendor groups (for nicer meta)
-WALLETS = ["paytm", "phonepe", "gpay", "googlepay", "mobikwik", "freecharge"]
-FOOD = ["zomato", "swiggy", "dunzo", "foodpanda", "dominos", "pizza hut", "pizza"]
+WALLETS = ["paytm", "phonepe", "gpay", "googlepay", "mobikwik", "freecharge", "bharatpe"]
+FOOD = ["zomato", "swiggy", "dunzo", "foodpanda", "dominos", "pizza hut", "pizza", "bigbasket" ]
 TRANSPORT = ["uber", "ola", "rapido", "redbus", "ola cabs", "uber india"]
 MARKETPLACES = ["amazon", "flipkart", "myntra", "ajio", "tatacliq", "amazon.in"]
-GROCERY = ["bigbasket", "dmart", "more", "spencer", "reliance fresh", "nature's basket", "grocery"]
-FUEL = ["bpcl", "indian oil", "ioctl", "hpcl", "bharat petroleum", "petrol", "fuel", "bpcl"]
-TRAVEL = ["indigo", "air india", "goair", "spicejet", "make my trip", "cleartrip", "ibibop", "booking.com"]
+GROCERY = ["bigbasket", "dmart", "more", "spencer", "reliance fresh", "natures basket", "nature's basket", "kirana"]
+FUEL = ["bpcl", "indian oil", "ioctl", "hpcl", "bharat petroleum", "petrol", "fuel", "petrol pump", "petrolcircle"]
+TRAVEL = ["indigo", "air india", "goair", "spicejet", "make my trip", "cleartrip", "ibibo", "booking.com", "makemytrip"]
 UTILITIES = ["broadband", "bsnl", "reliance jio", "jio", "vodafone", "airtel", "electricity", "bescom", "bses", "mahavitaran"]
-SUBSCRIPTIONS = ["netflix", "spotify", "prime video", "hotstar", "zee5", "youtube premium", "apple"]
-RECURRING_FEES = ["emi", "loan emi", "equated monthly", "monthly instalment"]
+SUBSCRIPTIONS = ["netflix", "spotify", "prime video", "hotstar", "zee5", "youtube premium", "apple", "spotify" ]
+RECURRING_FEES = ["emi", "loan emi", "equated monthly", "monthly instalment", "emipayment", "emipayment-", "emipay"]
 BANK_FEES = ["bank charges", "cheque bounce", "service charge", "monthly maintenance", "mms_charge", "sms_charge", "annual_card_fee"]
 
+# helper to find the first token in a description
 def _first_match_token(d: str, tokens):
     for t in tokens:
         if t in d:
             return t
     return None
 
+
 def classify_with_heuristics(description: str) -> Tuple[str, Optional[str], float, Dict]:
     """
     Returns (category, subcategory, confidence, meta)
+    meta includes matched_rule, matched_token and a short context snippet
     """
     if not description or not description.strip():
         return "PENDING", None, 0.0, {"reason": "empty"}
 
+    raw = description
     d = normalize(description)
-    meta: Dict = {"matched_rule": None, "matched_token": None}
+    meta: Dict = {"matched_rule": None, "matched_token": None, "context": d[:240]}
 
-    # High confidence exact / strong signals
+    # --- High confidence exact / strong signals ---
     # Income / Salary
     if any(k in d for k in ["salary", "credited", "salary credit", "payroll", "salary by", "salary from"]):
         meta.update({"matched_rule": "income_exact"})
         return "Income", "Salary", 0.98, meta
 
+    # EMI / Loan payments (explicit patterns like EMIPAYMENT-HDFC, HDFC-LOAN)
+    if any(k in d for k in RECURRING_FEES) or any(k in d for k in ["hdfc-loan", "emipayment", "emipay", "loan payment", "loan emi"]):
+        token = _first_match_token(d, RECURRING_FEES)
+        meta.update({"matched_rule": "emi_exact", "matched_token": token})
+        return "Bills", "EMI", 0.90, meta
+
     # Bank transfer / NEFT/IMPS (common label)
-    if BANK_TRANSFER_RE.search(d) or any(k in d for k in ["neft-", "imps/", "rtgs"]):
-        meta.update({"matched_rule": "bank_transfer", "matched_token": BANK_TRANSFER_RE.search(d).group(0) if BANK_TRANSFER_RE.search(d) else None})
+    bank_search = BANK_TRANSFER_RE.search(d)
+    if bank_search:
+        meta.update({"matched_rule": "bank_transfer", "matched_token": bank_search.group(0)})
         return "Transfers", "BankTransfer", 0.88, meta
 
-    # Wallets / UPI — treat as P2P / payments
-    if UPI_RE.search(d) or any(w in d for w in WALLETS) or "upi/" in d or "ipay" in d:
-        token = (UPI_RE.search(d).group(0) if UPI_RE.search(d) else _first_match_token(d, WALLETS))
+    # UPI / Wallets — more nuanced: try to detect merchant UPI vs P2P
+    upi_search = UPI_RE.search(d)
+    if upi_search or any(w in d for w in WALLETS):
+        token = (upi_search.group(0) if upi_search else _first_match_token(d, WALLETS))
         meta.update({"matched_rule": "upi_wallet", "matched_token": token})
-        # separate subcategories for wallets vs UPI merchant vs UPI refunds
+        # if merchant keyword appears alongside UPI, treat as merchant payment
+        merchant_token = _first_match_token(d, FOOD + TRANSPORT + GROCERY + MARKETPLACES + FUEL)
+        if merchant_token:
+            # map specific merchants
+            if merchant_token in FOOD:
+                return "Dining", "FoodDelivery", 0.80, meta
+            if merchant_token in TRANSPORT:
+                return "Transport", "Cab", 0.78, meta
+            if merchant_token in GROCERY:
+                return "Groceries", "Shopping", 0.78, meta
+            if merchant_token in FUEL:
+                return "Transport", "Fuel", 0.82, meta
+            if merchant_token in MARKETPLACES:
+                return "Shopping", "Online", 0.78, meta
+        # refund / reversal signals
         if any(k in d for k in ["refund", "reversal", "credited"]):
             return "Transfers", "Refund", 0.80, meta
+        # default to UPI transfer
         return "Transfers", "UPI", 0.75, meta
 
     # Card / POS transactions (merchant spend)
-    if CARD_RE.search(d) or any(k in d for k in ["visa-pos", "pos", "debit card", "credit card", "vpa"]):
-        meta.update({"matched_rule": "card_pos", "matched_token": CARD_RE.search(d).group(0) if CARD_RE.search(d) else None})
+    card_search = CARD_RE.search(d)
+    if card_search or any(k in d for k in ["visa-pos", "visa ref", "debit card", "credit card", "vpa"]):
+        token = card_search.group(0) if card_search else _first_match_token(d, MARKETPLACES + GROCERY + FUEL + FOOD + TRANSPORT)
+        meta.update({"matched_rule": "card_pos", "matched_token": token})
         # try to detect merchant verticals inside card desc
-        if any(k in d for k in FOOD):
+        if _first_match_token(d, FOOD):
             return "Dining", "Food", 0.78, meta
-        if any(k in d for k in FUEL):
+        if _first_match_token(d, FUEL) or any(k in d for k in ["petrol", "fuel", "petrol pump", "petrolcircle"]):
             return "Transport", "Fuel", 0.80, meta
-        if any(k in d for k in GROCERY):
+        if _first_match_token(d, GROCERY):
             return "Groceries", "Supermarket", 0.78, meta
+        # if card but merchant mentions 'service station' prefer fuel
+        if "service station" in d or "petrol" in d:
+            return "Transport", "Fuel", 0.80, meta
         return "Shopping", "POS", 0.70, meta
 
-    # Food / Dining / Delivery
-    if any(k in d for k in FOOD) or any(k in d for k in ["hotel", "resto", "restaurant", "meal", "dine"]):
-        meta.update({"matched_rule": "food_keywords", "matched_token": _first_match_token(d, FOOD)})
-        return "Dining", "FoodDelivery", 0.80 if any(k in d for k in ["zomato", "swiggy"]) else 0.66, meta
+    # Food / Dining / Delivery (non-card UPI or plain text)
+    if _first_match_token(d, FOOD) or any(k in d for k in ["hotel", "resto", "restaurant", "meal", "dine"]):
+        token = _first_match_token(d, FOOD)
+        meta.update({"matched_rule": "food_keywords", "matched_token": token})
+        return "Dining", "FoodDelivery", 0.80 if token in ["zomato", "swiggy"] else 0.66, meta
 
     # Transport (cab/ride/public)
-    if any(k in d for k in TRANSPORT) or any(k in d for k in ["cab", "taxi", "auto", "ride", "uber", "ola"]):
+    if _first_match_token(d, TRANSPORT) or any(k in d for k in ["cab", "taxi", "auto", "ride", "uber", "ola"]):
         token = _first_match_token(d, TRANSPORT)
         meta.update({"matched_rule": "transport", "matched_token": token})
-        # fares often small so medium confidence
         return "Transport", "Cab", 0.75, meta
 
     # Marketplaces / e-commerce
-    if any(k in d for k in MARKETPLACES) or any(k in d for k in ["online shopping", "order", "seller"]):
+    if _first_match_token(d, MARKETPLACES) or any(k in d for k in ["online shopping", "order", "seller", "marketplace"]):
         token = _first_match_token(d, MARKETPLACES)
         meta.update({"matched_rule": "marketplace", "matched_token": token})
         return "Shopping", "Online", 0.78, meta
 
     # Groceries / Supermarket heuristics
-    if any(k in d for k in GROCERY) or any(k in d for k in ["supermarket", "kirana", "grocery", "store"]):
+    if _first_match_token(d, GROCERY) or any(k in d for k in ["supermarket", "kirana", "grocery", "store"]):
         token = _first_match_token(d, GROCERY)
         meta.update({"matched_rule": "grocery", "matched_token": token})
         return "Groceries", "Shopping", 0.78, meta
 
-    # Fuel / Petrol stations
-    if any(k in d for k in FUEL) or "petrol" in d or "fuel" in d:
+    # Fuel / Petrol stations fallback
+    if _first_match_token(d, FUEL) or any(k in d for k in ["petrol", "service station", "fuel", "petrol pump"]):
         token = _first_match_token(d, FUEL)
         meta.update({"matched_rule": "fuel", "matched_token": token})
         return "Transport", "Fuel", 0.82, meta
 
     # Travel / booking / airline / hotels
-    if any(k in d for k in TRAVEL) or any(k in d for k in ["booking", "irctc", "railway", "train ticket", "flight", "hotel booking", "airtel bus"]):
+    if _first_match_token(d, TRAVEL) or any(k in d for k in ["booking", "irctc", "railway", "train ticket", "flight", "hotel booking", "airtel bus"]):
         meta.update({"matched_rule": "travel", "matched_token": _first_match_token(d, TRAVEL)})
         return "Travel", "TravelBooking", 0.80, meta
 
     # Utilities and telecom
-    if any(k in d for k in UTILITIES) or any(k in d for k in ["electricity", "water bill", "broadband", "gas bill", "mobile recharge"]):
+    if _first_match_token(d, UTILITIES) or any(k in d for k in ["electricity", "water bill", "broadband", "gas bill", "mobile recharge", "recharge"]):
         meta.update({"matched_rule": "utilities", "matched_token": _first_match_token(d, UTILITIES)})
         return "Bills", "Utilities", 0.85, meta
 
     # Subscriptions (streaming etc)
-    if any(k in d for k in SUBSCRIPTIONS) or "subscription" in d or "monthly plan" in d:
+    if _first_match_token(d, SUBSCRIPTIONS) or "subscription" in d or "monthly plan" in d:
         meta.update({"matched_rule": "subscription", "matched_token": _first_match_token(d, SUBSCRIPTIONS)})
         return "Entertainment", "Subscription", 0.88, meta
 
-    # EMI / Loan payments
-    if any(k in d for k in RECURRING_FEES) or "emi" in d or "equated" in d:
-        meta.update({"matched_rule": "emi", "matched_token": _first_match_token(d, RECURRING_FEES)})
-        return "Bills", "EMI", 0.90, meta
-
     # Bank charges / fees
-    if any(k in d for k in BANK_FEES) or "charge" in d and ("bank" in d or "service charge" in d):
+    if any(k in d for k in BANK_FEES) or ("charge" in d and ("bank" in d or "service charge" in d)):
         meta.update({"matched_rule": "bank_fee"})
         return "Bills", "BankCharges", 0.88, meta
 
@@ -179,8 +208,9 @@ def classify_with_heuristics(description: str) -> Tuple[str, Optional[str], floa
         return "Transport", "TollParking", 0.78, meta
 
     # Small heuristics for merchant id patterns and references
-    if TXN_REF_RE.search(d):
-        ref = TXN_REF_RE.search(d).group(0)
+    txn_search = TXN_REF_RE.search(d)
+    if txn_search:
+        ref = txn_search.group(0)
         meta.update({"matched_rule": "txn_ref", "matched_token": ref})
         # If a line has UPI and a txn ref it's likely a transfer/UPI payment
         if UPI_RE.search(d):
@@ -189,29 +219,26 @@ def classify_with_heuristics(description: str) -> Tuple[str, Optional[str], floa
         if any(k in d for k in ["shop", "store", "merchant", "m/s", "m/s."]):
             return "Shopping", "POS", 0.65, meta
 
-    # Numeric heuristics: small amounts under 500 often expenses like food/transport
-    amounts = AMOUNT_RE.findall(description.replace(",", ""))
-    if amounts:
-        try:
-            nums = [float(a.replace(",", "")) for a in amounts]
-            smallest = min(nums)
+    # Numeric heuristics: small amounts under 200 often expenses like food/transport
+    try:
+        amounts = [float(a.replace(",", "")) for a in AMOUNT_RE.findall(raw) if re.search(r"\d", a)]
+        if amounts:
+            smallest = min(amounts)
             meta.update({"matched_rule": "amount_heuristic", "sample_amounts": amounts})
             if smallest < 200:
-                # likely small daily spend — try classify as dining/transport fallback
                 if any(k in d for k in ["hotel", "restaurant", "canteen", "dhaba", "chai", "coffee"]):
                     return "Dining", "Food", 0.64, meta
-                if any(k in d for k in TRANSPORT):
+                if _first_match_token(d, TRANSPORT):
                     return "Transport", "Cab", 0.64, meta
-                # default low-confidence expense
                 return "Shopping", "Misc", 0.55, meta
-        except Exception:
-            pass
+    except Exception:
+        # keep going; don't fail classification because amount parsing failed
+        pass
 
     # Last-resort: attempt to salvage via vendor tokens (phonepe, paytm etc.)
     v = _first_match_token(d, WALLETS + FOOD + TRANSPORT + MARKETPLACES + GROCERY + FUEL + UTILITIES + SUBSCRIPTIONS)
     if v:
         meta.update({"matched_rule": "vendor_fallback", "matched_token": v})
-        # map vendor to category if possible
         if v in WALLETS:
             return "Transfers", "UPI", 0.68, meta
         if v in FOOD:

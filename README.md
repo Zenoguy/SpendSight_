@@ -1,223 +1,119 @@
 # SpendSight: Automated Financial Document Intelligence
 
-A Hybrid Rule-Based + ML + LLM System for Transaction Extraction, Categorization & Insights
+![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%2B-336791?logo=postgresql&logoColor=white)
+![Machine Learning](https://img.shields.io/badge/AI%2FML-MiniLM%20%7C%20LLM-FF6F00)
+![OCR](https://img.shields.io/badge/Vision-OCR%20%7C%20Table%20Transformer-8A2BE2)
 
-SpendSight is an end-to-end financial document processing system that parses bank statements and OCR-extracted PDFs, normalizes transactions, classifies them using a hybrid pipeline (Regex → Heuristics → MiniLM → LLM fallback), stores them securely in a relational database, and generates AI-driven dashboards and user-query insights using RAG.
+SpendSight is an end-to-end, parallelized financial document processing system. It extracts, normalizes, and categorizes transactions from bank statements (PDFs) and scanned receipts using a robust pipeline of determinisitic rules, localized machine learning, and LLM fallbacks. The system is designed to provide secure, structured insights through a FastAPI backend and a scalable PostgreSQL database.
 
-This repository contains all components required for ingestion, classification, analytics, and reporting.
+For complete technical specifications, see [specs.md](./specs.md).
 
 ---
 
 ## 🚀 Key Features
 
-### *1. Multi-Source Document Input*
+<img src="./architechture_images/WorkFlow_diagram.png" width="800" alt="SpendSight Workflow">
 
-* Accepts *PDFs, **scanned images, and **photos of receipts/statements*.
-* OCR auto-processing for images using *Table Transformer* + *LaTr-style recognition*.
+### 1. Unified, Parallel Parsing Pipeline
+- **Multi-Bank Parsing**: Bank-specific extractors for BOB, PNB, SBI, IDBI, ICICI, and Federal Bank.
+- **Generic OCR Parsing**: For unstructured image-derived PDFs.
+- **Parallel Processing**: Employs `ProcessPoolExecutor` for bulk ingestion, handling multiple documents concurrently for maximum throughput.
 
-### *2. Unified Parsing Pipeline*
+### 2. Hybrid 4-Stage Classification Architecture
+Our classification engine routes transactions sequentially, stopping as soon as high confidence is achieved:
+1. **Regex Engine**: Lightning-fast deterministic rules for known recurring patterns.
+2. **Heuristic Classifier**: Substring logic and intelligent keyword associations.
+3. **MiniLM/BERT**: Semantic analysis model for understanding ambiguous transaction strings.
+4. **LLM Fallback**: Batched processing via Gemini/LLM for complex edge cases.
 
-* Bank-specific parsers (BOB, PNB, SBI, Federal Bank)
-* Generic OCR parser for image-derived PDFs
-* Automatic bank detection + fallback handling
+### 3. OCR Microservice
+- Ingests images and flattened PDFs.
+- Uses Table Transformer and LaTr-style recognition for tabular data.
+- Automates upload to blob storage (Supabase/Vercel) and triggers downstream processing.
 
-### *3. Hybrid AI Classification Architecture*
+### 4. Natural Language RAG Insights
+- Uses vector embeddings (pgvector) over processed transactions to power natural language Q&A.
+- "How much did I spend on food this month?"
 
-1. *Regex Engine* (fast deterministic rules)
-2. *Heuristic Classifier* (smart keyword patterns)
-3. *MiniLM/BERT Classifier* (local semantic model)
-4. *LLM Fallback* (Gemini-based batch classification)
-
-### *4. Secure Storage & Data Model*
-
-* documents, statements, transactions
-* Per-user isolation
-* Optional Supabase storage for PDFs
-* Audit-friendly classification logs
-
-### *5. Dashboard Analytics*
-
-* Category spending distribution
-* Monthly spending
-* Vendor analytics
-* Summary statistics
-* Auto-snapshots stored in reports table
-
-### *6. RAG-Powered User Insights (Query Engine)*
-
-* Per-user vector store embeddings
-* Natural-language Q&A over transactions + summaries
-  
 ---
 
-# ⚙ Installation
+## ⚙️ Installation & Setup
 
-### *1. Clone the Project*
+### 1. Clone the project
 
-bash
+```bash
 git clone https://github.com/yourrepo/spendsight.git
 cd SpendSight
+```
 
+### 2. Virtual Environment & Dependencies
 
-### *2. Create a Virtual Environment*
-
-bash
+```bash
 python3 -m venv venv
 source venv/bin/activate
-
-
-### *3. Install Requirements*
-
-bash
 pip install -r requirements.txt
+```
 
+### 3. Environment Variables
 
-### *4. Environment Variables*
+Create a `.env` file at the root:
 
-Create a .env file:
-
-
-DATABASE_URL=your_supabase_postgres_url
-DEFAULT_USER_ID=the_uuid_user
+```env
+DATABASE_URL=your_postgresql_connection_string
+DEFAULT_USER_ID=your_uuid_for_user
+UNIFIED_PIPELINE_MAX_WORKERS=4
 SUPABASE_URL=...
 SUPABASE_SERVICE_KEY=...
-SUPABASE_BUCKET_NAME=test
-BLOB_READ_WRITE_TOKEN=your_vercel_blob_token
+```
 
+### 4. Database Setup
+The app requires a PostgreSQL database. Execute the schema definitions against your DB:
+```bash
+psql $DATABASE_URL -f schema.sql
+```
 
 ---
 
-# 📄 OCR Module Setup
+## 🔄 Using the Application
 
-Start OCR server:
+### Running the API Server
 
-bash
+The core functionality is exposed via a FastAPI application.
+```bash
+uvicorn main:app --reload
+```
+- **POST `/documents/upload`**: Upload statement/receipt images or PDFs.
+- **POST `/documents/{file_id}/parse`**: Enqueue the document into the Unified Pipeline.
+- **GET `/transactions`**: Retrieve, filter, and inspect processed transactions.
+
+### Running the Standalone Pipeline
+To bulk-process all PDFs placed in `data/input/`:
+```bash
+python3 UnifiedPipeline.py
+```
+This script handles routing to specific parsers, pushes to DB, applies the 4-stage classifiers, and prints detailed metrics logs showing how many transactions fell through to the LLM stage.
+
+### Running the OCR Service
+```bash
 cd ocr
 python3 main.py
-
-
-This provides:
-
-* POST /upload → Upload image/PDF, run OCR, store document, trigger UnifiedPipeline automatically
-* GET /files/{id} → Retrieve OCR metadata
-* GET /files/{id}/pdf → Download generated PDF
-
-The OCR module:
-
-✔ Uploads file to Vercel Blob
-✔ Runs OCR + table extraction
-✔ Generates a cleaned PDF for ingestion
-✔ Saves metadata into SQL tables
-✔ Writes the final PDF into data/input/
-✔ Calls UnifiedPipeline.process_file() automatically
+```
+Runs a dedicated endpoint for computer vision processing of receipts/invoices.
 
 ---
 
-# 🔄 Unified Ingestion Pipeline
-
-To run the full parsing + classification pipeline on all PDFs in data/input/:
-
-bash
-python3 UnifiedPipeline.py
-
-
-The pipeline will:
-
-1. Detect bank or use the generic OCR parser
-2. Extract raw transactions
-3. Normalize structure
-4. Insert into DB
-5. Run Regex → Heuristics → MiniLM → LLM
-6. Store classification logs
-7. Save dashboard snapshot
-
-On completion, it prints a full breakdown:
-
-
-Total transactions inserted: 229
-Regex: attempted=229, classified=180
-Heuristics: attempted=49, classified=22
-MiniLM: attempted=27, classified=21
-LLM: attempted=6, classified=6
-
+## 🔐 Security & Architecture Let's
+- **Per-User Isolation**: Database and logic restricts data queries tightly to `user_id` mapping.
+- **Vector Isolation**: Document embeddings are strictly sandboxed per user ensuring no cross-contamination.
+- **Data Extensibility**: Built entirely with relational models and structured logs (`classification_log`) to guarantee audibility of any predictive classification.
 
 ---
 
-# 📊 Dashboard Analytics
+## 👥 Credits
 
-Generate charts visualizing pipeline performance:
-
-bash
-python3 pipeline_visuals.py
-
-
-Produces:
-
-* Workload distribution (Regex vs MiniLM vs LLM)
-* Classification funnel
-* ROI plot (volume vs strong confidence)
-* Pending over time drift chart
-
-Outputs are saved to:
-
-
-data/reports/pipeline_metrics/
-
-
----
-
-# 💬 RAG Insights Engine (Optional)
-
-Inside the rag/ module (if present), the system:
-
-1. Embeds user transactions
-2. Stores vectors per user
-3. Answers voice/text questions like:
-
-   * “Why was my spending high last month?”
-   * “Show me all grocery purchases above ₹500.”
-   * “Summarize my October financial behaviour.”
-
-Uses hybrid SQL + retrieval-augmented generation.
-
----
-
-# 🔐 Security & Compliance
-
-SpendSight is designed with financial-grade constraints:
-
-* TLS 1.2+
-* Per-user DB + storage isolation
-* No cross-user vector leakage
-* Explicit admin access controls
-* GDPR/CCPA delete-on-request compatibility
-* PCI-DSS-compliant handling of sensitive financial identifiers
-
----
-
-# 🛠 Known Limitations
-
-* OCR parser accuracy varies for poor-quality scanned images
-* Bank formats outside India require new parsers
-* MiniLM classifier may mis-categorize rare merchant names
-* LLM fallback is slow and expensive → used sparingly
-
----
-
-# 🧭 Roadmap
-
-* Incremental learning pipeline for MiniLM
-* New bank parsers (ICICI, HDFC, Axis)
-* Real-time user alert engine
-* Interactive dashboard with drill-downs
-
----
-
-# 👥 Credits
-
-* Parsing & Classification Pipeline — Shreyan Ghosh & Sreedeep Dey.
-* OCR Subsystem and RAG— Sambhranta Ghosh.
-* Dashboard & Report Generation — Shreyan Ghosh.
-* Architecture & Integration — Shreyan Ghosh & Arka Ghosh.
-
----
+* **Parsing & Classification Pipeline** — Shreyan Ghosh & Sreedeep Dey
+* **OCR Subsystem and RAG** — Sambhranta Ghosh
+* **Dashboard & Report Generation** — Shreyan Ghosh
+* **Architecture & Integration** — Shreyan Ghosh & Arka Ghosh
