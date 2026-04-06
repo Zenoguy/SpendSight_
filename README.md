@@ -31,6 +31,35 @@ Our classification engine routes transactions sequentially, stopping as soon as 
 3. **MiniLM/BERT**: Semantic analysis model for understanding ambiguous transaction strings.
 4. **LLM Fallback**: Batched processing via Gemini/LLM for complex edge cases.
 
+---
+
+## 📊 Cost & Performance Analysis
+
+SpendSight is designed as a **cost-aware hybrid inference system**, where expensive models are only used when necessary.
+
+### Stage-wise Cost Breakdown
+
+| Stage | % of Total | Avg Cost / txn | Total Cost Contribution |
+|------|-----------|---------------|------------------------|
+| Regex | 9.6% | ~$0 | ~0% |
+| Heuristic | 46.5% | ~$0 | ~0% |
+| MiniLM | 20.2% | ~$0.0001 | negligible |
+| LLM | 23.7% | ~$0.002–0.01 | **~95% of cost** |
+
+> ⚡ **Key Insight:** ~24% of transactions generate ~95% of total inference cost.
+
+### Efficiency Metrics
+
+- ✅ **76% of transactions resolved before LLM stage**
+- 💸 **~$1.2 cost per 1000 transactions**
+- ⚖️ Heuristic layer provides highest cost-to-coverage efficiency
+
+### Pipeline Workload Funnel
+
+<img src="./architechture_images/pipeline_funnel.jpeg" width="600" alt="Pipeline Funnel">
+
+---
+
 ### 3. OCR Microservice
 
 - Ingests images and flattened PDFs.
