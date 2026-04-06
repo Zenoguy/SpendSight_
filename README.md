@@ -17,23 +17,28 @@ For complete technical specifications, see [specs.md](./specs.md).
 <img src="./architechture_images/WorkFlow_diagram.png" width="800" alt="SpendSight Workflow">
 
 ### 1. Unified, Parallel Parsing Pipeline
+
 - **Multi-Bank Parsing**: Bank-specific extractors for BOB, PNB, SBI, IDBI, ICICI, and Federal Bank.
 - **Generic OCR Parsing**: For unstructured image-derived PDFs.
 - **Parallel Processing**: Employs `ProcessPoolExecutor` for bulk ingestion, handling multiple documents concurrently for maximum throughput.
 
 ### 2. Hybrid 4-Stage Classification Architecture
+
 Our classification engine routes transactions sequentially, stopping as soon as high confidence is achieved:
+
 1. **Regex Engine**: Lightning-fast deterministic rules for known recurring patterns.
 2. **Heuristic Classifier**: Substring logic and intelligent keyword associations.
 3. **MiniLM/BERT**: Semantic analysis model for understanding ambiguous transaction strings.
 4. **LLM Fallback**: Batched processing via Gemini/LLM for complex edge cases.
 
 ### 3. OCR Microservice
+
 - Ingests images and flattened PDFs.
 - Uses Table Transformer and LaTr-style recognition for tabular data.
 - Automates upload to blob storage (Supabase/Vercel) and triggers downstream processing.
 
 ### 4. Natural Language RAG Insights
+
 - Uses vector embeddings (pgvector) over processed transactions to power natural language Q&A.
 - "How much did I spend on food this month?"
 
@@ -69,7 +74,9 @@ SUPABASE_SERVICE_KEY=...
 ```
 
 ### 4. Database Setup
+
 The app requires a PostgreSQL database. Execute the schema definitions against your DB:
+
 ```bash
 psql $DATABASE_URL -f schema.sql
 ```
@@ -81,39 +88,40 @@ psql $DATABASE_URL -f schema.sql
 ### Running the API Server
 
 The core functionality is exposed via a FastAPI application.
+
 ```bash
 uvicorn main:app --reload
 ```
+
 - **POST `/documents/upload`**: Upload statement/receipt images or PDFs.
 - **POST `/documents/{file_id}/parse`**: Enqueue the document into the Unified Pipeline.
 - **GET `/transactions`**: Retrieve, filter, and inspect processed transactions.
 
 ### Running the Standalone Pipeline
+
 To bulk-process all PDFs placed in `data/input/`:
+
 ```bash
 python3 UnifiedPipeline.py
 ```
+
 This script handles routing to specific parsers, pushes to DB, applies the 4-stage classifiers, and prints detailed metrics logs showing how many transactions fell through to the LLM stage.
 
 ### Running the OCR Service
+
 ```bash
 cd ocr
 python3 main.py
 ```
+
 Runs a dedicated endpoint for computer vision processing of receipts/invoices.
 
 ---
 
 ## 🔐 Security & Architecture Let's
+
 - **Per-User Isolation**: Database and logic restricts data queries tightly to `user_id` mapping.
 - **Vector Isolation**: Document embeddings are strictly sandboxed per user ensuring no cross-contamination.
 - **Data Extensibility**: Built entirely with relational models and structured logs (`classification_log`) to guarantee audibility of any predictive classification.
 
 ---
-
-## 👥 Credits
-
-* **Parsing & Classification Pipeline** — Shreyan Ghosh & Sreedeep Dey
-* **OCR Subsystem and RAG** — Sambhranta Ghosh
-* **Dashboard & Report Generation** — Shreyan Ghosh
-* **Architecture & Integration** — Shreyan Ghosh & Arka Ghosh
